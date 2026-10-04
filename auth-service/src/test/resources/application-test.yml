@@ -1,0 +1,28 @@
+eureka:
+  client:
+    enabled: false
+    register-with-eureka: false
+    fetch-registry: false
+
+spring:
+  cloud:
+    discovery:
+      enabled: false
+    openfeign:
+      circuitbreaker:
+        enabled: false
+
+security:
+  brevo:
+    api-key: test-mock-brevo-api-key
+  token:
+    secret-key: test_dummy_jwt_secret_key_for_unit_tests_must_be_256_bits_long_abcdef123456
+  oauth2:
+    google:
+      client-id: test-google-client-id.apps.googleusercontent.com
+  mail:
+    from-email: test@eventplatform.com
+    from-name: Test Platform
+  internal:
+    secret: test_internal_secret_for_mock_verification
+
