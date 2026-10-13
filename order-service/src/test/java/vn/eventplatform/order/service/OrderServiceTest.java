@@ -1,0 +1,339 @@
+package vn.eventplatform.order.service;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
+import vn.eventplatform.common.dto.ApiResponse;
+import vn.eventplatform.common.dto.ErrorCode;
+import vn.eventplatform.common.exception.AppException;
+import vn.eventplatform.order.client.EventServiceClient;
+import vn.eventplatform.order.client.EventServiceFallback;
+import vn.eventplatform.order.client.dto.CheckAndReserveInventoryResponse;
+import vn.eventplatform.order.client.dto.TicketTypeInventoryDto;
+import vn.eventplatform.order.domain.Order;
+import vn.eventplatform.order.domain.OrderStatus;
+import vn.eventplatform.order.dto.CreateOrderItemRequest;
+import vn.eventplatform.order.dto.CreateOrderRequest;
+import vn.eventplatform.order.dto.OrderResponse;
+import vn.eventplatform.order.mapper.OrderMapper;
+import vn.eventplatform.order.repository.OrderRepository;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class OrderServiceTest {
+
+    @Mock
+    private OrderRepository orderRepository;
+
+    @Mock
+    private OrderMapper orderMapper;
+
+    @Mock
+    private EventServiceClient eventServiceClient;
+
+    @Captor
+    private ArgumentCaptor<Order> orderCaptor;
+
+    private OrderServiceImpl orderService;
+
+    @BeforeEach
+    void setUp() {
+        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient);
+        ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
+    }
+
+    @Test
+    @DisplayName("Tạo đơn hàng thành công: Kiểm tra tồn kho, snapshot subtotal và snapshot total_amount thực trả")
+    void shouldCreateOrderWithSnapshotPricesAndInventoryReservation() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId1 = UUID.randomUUID();
+        UUID ticketTypeId2 = UUID.randomUUID();
+
+        // Client chỉ gửi ticketTypeId và quantity (unitPrice nếu có từ client cũng bị override bởi snapshot)
+        CreateOrderItemRequest item1 = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId1)
+                .quantity(2)
+                .build();
+
+        CreateOrderItemRequest item2 = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId2)
+                .quantity(1)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Nguyen Van A")
+                .customerEmail("vana@example.com")
+                .customerPhone("0987654321")
+                .discountAmount(new BigDecimal("100000"))
+                .items(List.of(item1, item2))
+                .build();
+
+        // Giả lập Event Service trả về snapshot đơn giá chính thức: Vé 1 = 500,000, Vé 2 = 200,000
+        TicketTypeInventoryDto inventory1 = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId1)
+                .ticketTypeName("Vé VIP")
+                .price(new BigDecimal("500000"))
+                .maxPerOrder(10)
+                .availableQuantity(20)
+                .build();
+
+        TicketTypeInventoryDto inventory2 = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId2)
+                .ticketTypeName("Vé Thường")
+                .price(new BigDecimal("200000"))
+                .maxPerOrder(10)
+                .availableQuantity(50)
+                .build();
+
+        CheckAndReserveInventoryResponse reserveResponse = CheckAndReserveInventoryResponse.builder()
+                .success(true)
+                .reservedItems(List.of(inventory1, inventory2))
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(reserveResponse));
+
+        when(orderRepository.existsByOrderCode(any())).thenReturn(false);
+        when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        OrderResponse expectedResponse = OrderResponse.builder()
+                .orderCode("TKZ-20261013-ABC12")
+                .subtotal(new BigDecimal("1200000"))
+                .discountAmount(new BigDecimal("100000"))
+                .totalAmount(new BigDecimal("1100000"))
+                .status(OrderStatus.PENDING)
+                .build();
+        when(orderMapper.toResponse(any(Order.class))).thenReturn(expectedResponse);
+
+        OrderResponse response = orderService.createOrder(userId, request);
+
+        assertThat(response).isNotNull();
+        verify(eventServiceClient).checkAndReserveInventory(eq("test-internal-secret"), any());
+
+        verify(orderRepository).save(orderCaptor.capture());
+        Order savedOrder = orderCaptor.getValue();
+        assertThat(savedOrder.getUserId()).isEqualTo(userId);
+        assertThat(savedOrder.getEventId()).isEqualTo(eventId);
+        assertThat(savedOrder.getShowTimeId()).isEqualTo(showTimeId);
+
+        // Snapshot Subtotal = (2 * 500,000) + (1 * 200,000) = 1,200,000
+        assertThat(savedOrder.getSubtotal()).isEqualByComparingTo(new BigDecimal("1200000"));
+        // Snapshot DiscountAmount = 100,000
+        assertThat(savedOrder.getDiscountAmount()).isEqualByComparingTo(new BigDecimal("100000"));
+        // Snapshot TotalAmount thực trả = 1,200,000 - 100,000 = 1,100,000
+        assertThat(savedOrder.getTotalAmount()).isEqualByComparingTo(new BigDecimal("1100000"));
+
+        assertThat(savedOrder.getStatus()).isEqualTo(OrderStatus.PENDING);
+        assertThat(savedOrder.getOrderCode()).matches("^TKZ-\\d{8}-[A-Z0-9]+$");
+
+        // Giữ chỗ ~15 phút
+        Instant now = Instant.now();
+        assertThat(savedOrder.getExpiresAt()).isAfter(now.plus(14, ChronoUnit.MINUTES));
+        assertThat(savedOrder.getExpiresAt()).isBefore(now.plus(16, ChronoUnit.MINUTES));
+
+        // Kiểm tra OrderItems đã snapshot đúng đơn giá
+        assertThat(savedOrder.getItems()).hasSize(2);
+        assertThat(savedOrder.getItems().get(0).getUnitPrice()).isEqualByComparingTo(new BigDecimal("500000"));
+        assertThat(savedOrder.getItems().get(1).getUnitPrice()).isEqualByComparingTo(new BigDecimal("200000"));
+    }
+
+    @Test
+    @DisplayName("Ném ngoại lệ khi tồn kho không đủ (Event Service báo lỗi)")
+    void shouldThrowExceptionWhenInventoryInsufficient() {
+        UUID userId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(10)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(UUID.randomUUID())
+                .showTimeId(UUID.randomUUID())
+                .items(List.of(item))
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenThrow(new AppException(ErrorCode.BAD_REQUEST, "Hạng vé không đủ số lượng vé khả dụng (còn lại: 2, yêu cầu: 10)"));
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("không đủ số lượng vé khả dụng");
+
+        verify(orderRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Tích hợp thực tế với EventServiceFallback: Kiểm tra tồn kho & trừ kho thành công")
+    void shouldWorkWithEventServiceFallback() {
+        EventServiceFallback fallback = new EventServiceFallback();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        // Seed tồn kho 5 vé giá 300,000
+        fallback.seedInventory(showTimeId, ticketTypeId, "Vé VIP", new BigDecimal("300000"), 5, 10);
+
+        OrderServiceImpl serviceWithFallback = new OrderServiceImpl(orderRepository, orderMapper, fallback);
+        ReflectionTestUtils.setField(serviceWithFallback, "internalSecret", "secret");
+
+        UUID userId = UUID.randomUUID();
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(3)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .customerName("Le Van C")
+                .customerEmail("vanc@example.com")
+                .items(List.of(item))
+                .discountAmount(new BigDecimal("50000"))
+                .build();
+
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(orderMapper.toResponse(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0);
+            return OrderResponse.builder()
+                    .subtotal(o.getSubtotal())
+                    .discountAmount(o.getDiscountAmount())
+                    .totalAmount(o.getTotalAmount())
+                    .status(o.getStatus())
+                    .build();
+        });
+
+        OrderResponse res = serviceWithFallback.createOrder(userId, request);
+
+        // Subtotal = 3 * 300,000 = 900,000
+        // Discount = 50,000
+        // TotalAmount = 850,000
+        assertThat(res.getSubtotal()).isEqualByComparingTo(new BigDecimal("900000"));
+        assertThat(res.getTotalAmount()).isEqualByComparingTo(new BigDecimal("850000"));
+
+        // Lần mua tiếp theo yêu cầu 3 vé nữa -> tồn kho chỉ còn 2 vé khả dụng (5 - 3 = 2) -> phải ném ngoại lệ
+        assertThatThrownBy(() -> serviceWithFallback.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("không đủ số lượng vé khả dụng");
+    }
+
+    @Test
+    @DisplayName("Ném ngoại lệ khi danh sách items rỗng")
+    void shouldThrowWhenItemsEmpty() {
+        UUID userId = UUID.randomUUID();
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(UUID.randomUUID())
+                .showTimeId(UUID.randomUUID())
+                .items(Collections.emptyList())
+                .build();
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng phải chứa ít nhất 1 hạng vé");
+    }
+
+    @Test
+    @DisplayName("Giới hạn giảm giá tối đa không vượt quá subtotal")
+    void shouldCapDiscountAmountAtSubtotal() {
+        UUID userId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(UUID.randomUUID())
+                .showTimeId(UUID.randomUUID())
+                .discountAmount(new BigDecimal("500000")) // giảm giá lớn hơn subtotal
+                .items(List.of(item))
+                .build();
+
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé Thường")
+                .price(new BigDecimal("100000"))
+                .maxPerOrder(10)
+                .availableQuantity(50)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        orderService.createOrder(userId, request);
+
+        verify(orderRepository).save(orderCaptor.capture());
+        Order savedOrder = orderCaptor.getValue();
+        assertThat(savedOrder.getSubtotal()).isEqualByComparingTo(new BigDecimal("100000"));
+        assertThat(savedOrder.getDiscountAmount()).isEqualByComparingTo(new BigDecimal("100000"));
+        assertThat(savedOrder.getTotalAmount()).isEqualByComparingTo(BigDecimal.ZERO);
+    }
+
+    @Test
+    @DisplayName("Từ chối truy cập khi người dùng khác xem chi tiết đơn hàng")
+    void shouldThrowAccessDeniedWhenNotOwnerNorAdmin() {
+        UUID ownerId = UUID.randomUUID();
+        UUID otherUserId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .userId(ownerId)
+                .build();
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        assertThatThrownBy(() -> orderService.getOrderById(orderId, otherUserId, false))
+                .isInstanceOf(AppException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ErrorCode.ACCESS_DENIED);
+    }
+
+    @Test
+    @DisplayName("Cho phép xem chi tiết đơn hàng nếu là Admin")
+    void shouldAllowAdminToViewOrder() {
+        UUID ownerId = UUID.randomUUID();
+        UUID adminId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .userId(ownerId)
+                .build();
+
+        OrderResponse response = OrderResponse.builder().id(orderId).userId(ownerId).build();
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(orderMapper.toResponse(order)).thenReturn(response);
+
+        OrderResponse result = orderService.getOrderById(orderId, adminId, true);
+        assertThat(result).isNotNull();
+        assertThat(result.getId()).isEqualTo(orderId);
+    }
+}

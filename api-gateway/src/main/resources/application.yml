@@ -47,6 +47,18 @@ spring:
           filters:
             - SetPath=/v3/api-docs
 
+        - id: order-service-route
+          uri: lb://order-service
+          predicates:
+            - Path=/api/v1/orders/**
+
+        - id: order-service-docs
+          uri: lb://order-service
+          predicates:
+            - Path=/v3/api-docs/order-service
+          filters:
+            - SetPath=/v3/api-docs
+
       globalcors:
         cors-configurations:
           '[/**]':
@@ -81,3 +93,5 @@ springdoc:
         url: /v3/api-docs/user-service
       - name: 3. Ticket Service (Vé & Check-in)
         url: /v3/api-docs/ticket-service
+      - name: 4. Order Service (Đơn hàng & Giữ chỗ)
+        url: /v3/api-docs/order-service
