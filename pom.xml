@@ -34,6 +34,7 @@
         <module>api-gateway</module>
         <module>auth-service</module>
         <module>user-service</module>
+        <module>promotion-service</module>
     </modules>
 
     <dependencyManagement>
