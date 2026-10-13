@@ -35,6 +35,18 @@ spring:
           filters:
             - SetPath=/v3/api-docs
 
+        - id: ticket-service-route
+          uri: lb://ticket-service
+          predicates:
+            - Path=/api/v1/tickets/**, /api/v1/check-ins/**
+
+        - id: ticket-service-docs
+          uri: lb://ticket-service
+          predicates:
+            - Path=/v3/api-docs/ticket-service
+          filters:
+            - SetPath=/v3/api-docs
+
       globalcors:
         cors-configurations:
           '[/**]':
@@ -67,3 +79,5 @@ springdoc:
         url: /v3/api-docs/auth-service
       - name: 2. User Service (Hồ sơ & Phân quyền)
         url: /v3/api-docs/user-service
+      - name: 3. Ticket Service (Vé & Check-in)
+        url: /v3/api-docs/ticket-service
