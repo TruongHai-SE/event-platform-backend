@@ -32,4 +32,14 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     @Query("SELECT t FROM Ticket t LEFT JOIN FETCH t.checkIn WHERE t.orderId = :orderId")
     List<Ticket> findByOrderIdWithCheckIn(@Param("orderId") UUID orderId);
+
+    List<Ticket> findByShowTimeIdIn(List<UUID> showTimeIds);
+
+    @org.springframework.data.jpa.repository.Modifying
+    @Query("UPDATE Ticket t SET t.status = :newStatus WHERE t.showTimeId IN :showTimeIds AND t.status != :newStatus")
+    int cancelTicketsByShowTimeIds(@Param("showTimeIds") List<UUID> showTimeIds, @Param("newStatus") TicketStatus newStatus);
+
+    @org.springframework.data.jpa.repository.Modifying
+    @Query("UPDATE Ticket t SET t.status = :newStatus WHERE t.showTimeId = :showTimeId AND t.status != :newStatus")
+    int cancelTicketsByShowTimeId(@Param("showTimeId") UUID showTimeId, @Param("newStatus") TicketStatus newStatus);
 }
