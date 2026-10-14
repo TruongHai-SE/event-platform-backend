@@ -19,6 +19,16 @@ The test topology was `API Gateway (8080) -> Eureka -> ad-service (8086)` with P
 - Springdoc was added so the gateway Swagger aggregation endpoint is available.
 - Eureka now registers the service by IP address for reliable local gateway routing.
 
+## Automated tests
+
+`AdServiceTest` contains six unit tests covering PREPAID and POSTPAID_ESCROW campaign pricing, settlement publishing, invalid campaign periods, public-banner mapping/order, and pending-image approval including its failure path. Run with:
+
+```text
+mvn -pl ad-service -am test
+```
+
+Latest result: **6 tests passed; 0 failures; 0 errors**.
+
 ## External dependency
 
 `POST /api/v1/admin/banners/upload` requires a real Cloudinary cloud name and unsigned upload preset. It is reachable through the gateway, but an upload success case needs those deployment credentials and was not claimed as verified locally.
