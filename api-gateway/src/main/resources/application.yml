@@ -59,6 +59,30 @@ spring:
           filters:
             - SetPath=/v3/api-docs
 
+        - id: ticket-service-route
+          uri: lb://ticket-service
+          predicates:
+            - Path=/api/v1/tickets/**, /api/v1/check-ins/**
+
+        - id: ticket-service-docs
+          uri: lb://ticket-service
+          predicates:
+            - Path=/v3/api-docs/ticket-service
+          filters:
+            - SetPath=/v3/api-docs
+
+        - id: order-service-route
+          uri: lb://order-service
+          predicates:
+            - Path=/api/v1/orders/**
+
+        - id: order-service-docs
+          uri: lb://order-service
+          predicates:
+            - Path=/v3/api-docs/order-service
+          filters:
+            - SetPath=/v3/api-docs
+
       globalcors:
         cors-configurations:
           '[/**]':
@@ -95,3 +119,7 @@ springdoc:
         url: /v3/api-docs/promotion-service
       - name: 4. Ad Service (Quảng cáo)
         url: /v3/api-docs/ad-service
+      - name: 5. Ticket Service (Vé & Check-in)
+        url: /v3/api-docs/ticket-service
+      - name: 6. Order Service (Đơn hàng & Giữ chỗ)
+        url: /v3/api-docs/order-service

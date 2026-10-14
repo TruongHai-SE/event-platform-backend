@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: ${DB_USERNAME:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
-      POSTGRES_MULTIPLE_DATABASES: "event_auth_db,event_user_db"
+      POSTGRES_MULTIPLE_DATABASES: "event_auth_db,event_user_db,event_ticket_db,event_order_db"
     ports:
       - "${DB_PORT:-5434}:5432"
     volumes:
