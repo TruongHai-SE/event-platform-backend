@@ -21,6 +21,16 @@ spring:
           predicates:
             - Path=/api/v1/users/**, /api/v1/roles/**, /api/v1/permissions/**
 
+        - id: promotion-service-route
+          uri: lb://promotion-service
+          predicates:
+            - Path=/api/v1/admin/vouchers/**, /api/v1/organizer/vouchers/**, /api/v1/vouchers/**, /internal/v1/vouchers/**
+
+        - id: ad-service-route
+          uri: lb://ad-service
+          predicates:
+            - Path=/api/v1/public/banners/**, /api/v1/admin/ad-packages/**, /api/v1/admin/ad-campaigns/**, /api/v1/admin/banners/**, /api/v1/organizer/ad-campaigns/**, /internal/v1/ad-campaigns/**
+
         - id: auth-service-docs
           uri: lb://auth-service
           predicates:
@@ -32,6 +42,20 @@ spring:
           uri: lb://user-service
           predicates:
             - Path=/v3/api-docs/user-service
+          filters:
+            - SetPath=/v3/api-docs
+
+        - id: promotion-service-docs
+          uri: lb://promotion-service
+          predicates:
+            - Path=/v3/api-docs/promotion-service
+          filters:
+            - SetPath=/v3/api-docs
+
+        - id: ad-service-docs
+          uri: lb://ad-service
+          predicates:
+            - Path=/v3/api-docs/ad-service
           filters:
             - SetPath=/v3/api-docs
 
@@ -67,3 +91,7 @@ springdoc:
         url: /v3/api-docs/auth-service
       - name: 2. User Service (Hồ sơ & Phân quyền)
         url: /v3/api-docs/user-service
+      - name: 3. Promotion Service (Voucher)
+        url: /v3/api-docs/promotion-service
+      - name: 4. Ad Service (Quảng cáo)
+        url: /v3/api-docs/ad-service
