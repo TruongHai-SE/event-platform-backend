@@ -1,0 +1,1 @@
+package vn.eventplatform.ad.repository; import org.springframework.data.jpa.repository.JpaRepository; import vn.eventplatform.ad.domain.AdCampaign; import java.util.*; public interface AdCampaignRepository extends JpaRepository<AdCampaign,UUID>{List<AdCampaign> findByOrganizerId(UUID organizerId);}
