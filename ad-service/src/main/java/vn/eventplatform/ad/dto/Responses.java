@@ -1,0 +1,3 @@
+package vn.eventplatform.ad.dto;
+import vn.eventplatform.ad.enums.*; import java.math.BigDecimal; import java.time.LocalDateTime; import java.util.UUID;
+public final class Responses { private Responses(){} public record PackageResponse(UUID id,String name,String description,BigDecimal price,Integer durationDays,Boolean active){} public record CampaignResponse(UUID id,UUID organizerId,UUID packageId,String name,PricingMode pricingMode,CampaignStatus status,BigDecimal feeAmount,BigDecimal escrowAmount,Boolean settlementPublished,String rejectionReason){} public record BannerResponse(UUID id,UUID campaignId,String imageUrl,String pendingImageUrl,BannerPosition position,Integer priority,LocalDateTime startsAt,LocalDateTime endsAt){} }

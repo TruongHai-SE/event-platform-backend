@@ -1,0 +1,1 @@
+package vn.eventplatform.ad.repository; import org.springframework.data.jpa.repository.JpaRepository; import vn.eventplatform.ad.domain.AdPackage; import java.util.UUID; public interface AdPackageRepository extends JpaRepository<AdPackage,UUID>{}
