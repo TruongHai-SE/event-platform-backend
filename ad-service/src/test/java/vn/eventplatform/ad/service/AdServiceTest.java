@@ -10,6 +10,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import vn.eventplatform.ad.domain.AdCampaign;
 import vn.eventplatform.ad.domain.AdPackage;
 import vn.eventplatform.ad.domain.Banner;
+import vn.eventplatform.ad.domain.AdPositionPrice;
 import vn.eventplatform.ad.dto.Requests;
 import vn.eventplatform.ad.enums.BannerPosition;
 import vn.eventplatform.ad.enums.CampaignStatus;
@@ -17,6 +18,8 @@ import vn.eventplatform.ad.enums.PricingMode;
 import vn.eventplatform.ad.repository.AdCampaignRepository;
 import vn.eventplatform.ad.repository.AdPackageRepository;
 import vn.eventplatform.ad.repository.BannerRepository;
+import vn.eventplatform.ad.repository.AdPositionPriceRepository;
+import vn.eventplatform.ad.repository.CampaignPositionRepository;
 import vn.eventplatform.common.exception.AppException;
 
 import java.math.BigDecimal;
@@ -35,6 +38,8 @@ class AdServiceTest {
     @Mock private AdPackageRepository packages;
     @Mock private AdCampaignRepository campaigns;
     @Mock private BannerRepository banners;
+    @Mock private AdPositionPriceRepository positionPrices;
+    @Mock private CampaignPositionRepository campaignPositions;
     @InjectMocks private AdService service;
 
     private UUID packageId;
@@ -53,6 +58,7 @@ class AdServiceTest {
 
     @Test
     void createsPrepaidCampaignWithPackagePrice() {
+        activePosition(BannerPosition.HOME_TOP, "50.00");
         when(packages.findById(packageId)).thenReturn(Optional.of(adPackage));
         when(campaigns.save(any(AdCampaign.class))).thenAnswer(invocation -> {
             AdCampaign campaign = invocation.getArgument(0);
@@ -63,12 +69,15 @@ class AdServiceTest {
         var result = service.register(UUID.randomUUID(), campaignRequest(PricingMode.PREPAID, null));
 
         assertThat(result.status()).isEqualTo(CampaignStatus.PENDING_APPROVAL);
-        assertThat(result.feeAmount()).isEqualByComparingTo("120.00");
+        assertThat(result.packagePrice()).isEqualByComparingTo("120.00");
+        assertThat(result.totalPrice()).isEqualByComparingTo("170.00");
+        assertThat(result.feeAmount()).isEqualByComparingTo("170.00");
         assertThat(result.escrowAmount()).isEqualByComparingTo(BigDecimal.ZERO);
     }
 
     @Test
     void createsPostpaidCampaignWithEscrowAndPublishesSettlement() {
+        activePosition(BannerPosition.HOME_TOP, "50.00");
         when(packages.findById(packageId)).thenReturn(Optional.of(adPackage));
         when(campaigns.save(any(AdCampaign.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -81,8 +90,8 @@ class AdServiceTest {
 
         service.publishSettlement(campaign.getId());
 
-        assertThat(campaign.getFeeAmount()).isEqualByComparingTo("120.00");
-        assertThat(campaign.getEscrowAmount()).isEqualByComparingTo("150");
+        assertThat(campaign.getFeeAmount()).isEqualByComparingTo("170.00");
+        assertThat(campaign.getEscrowAmount()).isEqualByComparingTo("170.00");
         assertThat(campaign.getSettlementPublished()).isTrue();
     }
 
@@ -90,11 +99,38 @@ class AdServiceTest {
     void rejectsCampaignWithInvalidTimeRange() {
         when(packages.findById(packageId)).thenReturn(Optional.of(adPackage));
         LocalDateTime now = LocalDateTime.now();
-        var request = new Requests.CampaignRequest(packageId, "Bad", PricingMode.PREPAID, now, now, null);
+        var request = new Requests.CampaignRequest(packageId, "Bad", PricingMode.PREPAID, List.of(BannerPosition.HOME_TOP), now, now, null);
 
         assertThatThrownBy(() -> service.register(UUID.randomUUID(), request))
                 .isInstanceOf(AppException.class)
                 .hasMessageContaining("Thời gian campaign không hợp lệ");
+    }
+
+    @Test
+    void rejectsCampaignWithDuplicatePositions() {
+        when(packages.findById(packageId)).thenReturn(Optional.of(adPackage));
+        LocalDateTime now = LocalDateTime.now();
+        var request = new Requests.CampaignRequest(packageId, "Duplicate", PricingMode.PREPAID,
+                List.of(BannerPosition.HOME_TOP, BannerPosition.HOME_TOP), now, now.plusDays(1), null);
+
+        assertThatThrownBy(() -> service.register(UUID.randomUUID(), request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("không được trùng lặp");
+    }
+
+    @Test
+    void rejectsBannerPositionNotPurchasedByCampaign() {
+        AdCampaign campaign = new AdCampaign();
+        UUID campaignId = UUID.randomUUID();
+        campaign.setId(campaignId);
+        when(campaigns.findById(campaignId)).thenReturn(Optional.of(campaign));
+        when(campaignPositions.existsByCampaignIdAndPosition(campaignId, BannerPosition.HOME_TOP)).thenReturn(false);
+        var request = new Requests.BannerRequest(campaignId, "https://cdn.example/banner.png", BannerPosition.HOME_TOP,
+                1, LocalDateTime.now(), LocalDateTime.now().plusHours(1), true);
+
+        assertThatThrownBy(() -> service.banner(request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("không thuộc các position đã đăng ký");
     }
 
     @Test
@@ -103,9 +139,9 @@ class AdServiceTest {
         Banner second = banner(10);
         when(banners.findPublic(any(LocalDateTime.class))).thenReturn(List.of(first, second));
 
-        var result = service.publicBanners();
+        var result = service.publicBanners().bannersByPosition();
 
-        assertThat(result).extracting(response -> response.priority()).containsExactly(100, 10);
+        assertThat(result.get(BannerPosition.HOME_TOP)).extracting(response -> response.priority()).containsExactly(100, 10);
         verify(banners).findPublic(any(LocalDateTime.class));
     }
 
@@ -134,8 +170,17 @@ class AdServiceTest {
     }
 
     private Requests.CampaignRequest campaignRequest(PricingMode mode, BigDecimal escrow) {
-        return new Requests.CampaignRequest(packageId, "Gateway campaign", mode,
+        return new Requests.CampaignRequest(packageId, "Gateway campaign", mode, List.of(BannerPosition.HOME_TOP),
                 LocalDateTime.now().minusMinutes(1), LocalDateTime.now().plusDays(1), escrow);
+    }
+
+    private void activePosition(BannerPosition position, String bonusPrice) {
+        AdPositionPrice configured = new AdPositionPrice();
+        configured.setId(UUID.randomUUID());
+        configured.setPosition(position);
+        configured.setBonusPrice(new BigDecimal(bonusPrice));
+        configured.setActive(true);
+        when(positionPrices.findByPosition(position)).thenReturn(Optional.of(configured));
     }
 
     private Banner banner(int priority) {
