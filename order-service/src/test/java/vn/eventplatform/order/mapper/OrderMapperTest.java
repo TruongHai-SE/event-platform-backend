@@ -1,11 +1,9 @@
 package vn.eventplatform.order.mapper;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit.jupiter.SpringExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 import vn.eventplatform.order.domain.Order;
 import vn.eventplatform.order.domain.OrderItem;
 import vn.eventplatform.order.domain.OrderStatus;
@@ -19,15 +17,19 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@ExtendWith(SpringExtension.class)
-@ContextConfiguration(classes = {OrderMapperImpl.class, OrderItemMapperImpl.class})
+import org.mapstruct.factory.Mappers;
+
 class OrderMapperTest {
 
-    @Autowired
     private OrderMapper orderMapper;
-
-    @Autowired
     private OrderItemMapper orderItemMapper;
+
+    @BeforeEach
+    void setUp() {
+        orderItemMapper = Mappers.getMapper(OrderItemMapper.class);
+        orderMapper = Mappers.getMapper(OrderMapper.class);
+        ReflectionTestUtils.setField(orderMapper, "orderItemMapper", orderItemMapper);
+    }
 
     @Test
     @DisplayName("Ánh xạ từ CreateOrderItemRequest sang OrderItem entity")
