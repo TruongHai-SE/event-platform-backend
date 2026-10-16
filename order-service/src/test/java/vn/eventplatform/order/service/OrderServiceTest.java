@@ -49,6 +49,17 @@ class OrderServiceTest {
     @Mock
     private EventServiceClient eventServiceClient;
 
+    @Mock
+    private vn.eventplatform.order.lock.InventoryLockService inventoryLockService;
+
+    private final org.springframework.transaction.support.TransactionOperations transactionOperations =
+            new org.springframework.transaction.support.TransactionOperations() {
+                @Override
+                public <T> T execute(org.springframework.transaction.support.TransactionCallback<T> action) {
+                    return action.doInTransaction(mock(org.springframework.transaction.TransactionStatus.class));
+                }
+            };
+
     @Captor
     private ArgumentCaptor<Order> orderCaptor;
 
@@ -56,7 +67,12 @@ class OrderServiceTest {
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient);
+        lenient().when(inventoryLockService.executeWithLock(any(), any(), any(java.util.function.Supplier.class))).thenAnswer(invocation -> {
+            java.util.function.Supplier<?> action = invocation.getArgument(2);
+            return action.get();
+        });
+
+        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
     }
 
@@ -196,7 +212,7 @@ class OrderServiceTest {
         // Seed tồn kho 5 vé giá 300,000
         fallback.seedInventory(showTimeId, ticketTypeId, "Vé VIP", new BigDecimal("300000"), 5, 10);
 
-        OrderServiceImpl serviceWithFallback = new OrderServiceImpl(orderRepository, orderMapper, fallback);
+        OrderServiceImpl serviceWithFallback = new OrderServiceImpl(orderRepository, orderMapper, fallback, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(serviceWithFallback, "internalSecret", "secret");
 
         UUID userId = UUID.randomUUID();
@@ -335,5 +351,99 @@ class OrderServiceTest {
         OrderResponse result = orderService.getOrderById(orderId, adminId, true);
         assertThat(result).isNotNull();
         assertThat(result.getId()).isEqualTo(orderId);
+    }
+
+    @Test
+    @DisplayName("Chống oversell & lỗi dữ liệu: Từ chối đơn hàng chứa hạng vé bị trùng lặp")
+    void shouldThrowBadRequestWhenDuplicateTicketTypesInOrderRequest() {
+        UUID userId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID duplicateTicketTypeId = UUID.randomUUID();
+
+        CreateOrderItemRequest item1 = CreateOrderItemRequest.builder()
+                .ticketTypeId(duplicateTicketTypeId)
+                .quantity(2)
+                .build();
+
+        CreateOrderItemRequest item2 = CreateOrderItemRequest.builder()
+                .ticketTypeId(duplicateTicketTypeId)
+                .quantity(1)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .customerName("Nguyen Van A")
+                .customerEmail("vana@example.com")
+                .items(List.of(item1, item2))
+                .build();
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("không được chứa các hạng vé trùng lặp");
+
+        verify(orderRepository, never()).save(any());
+        verify(inventoryLockService, never()).executeWithLock(any(), any(), any(java.util.function.Supplier.class));
+    }
+
+    @Test
+    @DisplayName("Redis Lock: Xác nhận executeWithLock được gọi đúng showTimeId và danh sách ticketTypeIds")
+    void shouldInvokeInventoryLockServiceWithExactShowTimeAndTicketTypes() {
+        UUID userId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId1 = UUID.randomUUID();
+        UUID ticketTypeId2 = UUID.randomUUID();
+
+        CreateOrderItemRequest item1 = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId1)
+                .quantity(2)
+                .build();
+
+        CreateOrderItemRequest item2 = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId2)
+                .quantity(1)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .customerName("Nguyen Van B")
+                .customerEmail("vanb@example.com")
+                .items(List.of(item1, item2))
+                .build();
+
+        // Mock eventServiceClient trả về inventory hợp lệ
+        TicketTypeInventoryDto inv1 = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId1)
+                .ticketTypeName("Vé Standard")
+                .price(new BigDecimal("150000"))
+                .maxPerOrder(10)
+                .availableQuantity(50)
+                .build();
+
+        TicketTypeInventoryDto inv2 = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId2)
+                .ticketTypeName("Vé VIP")
+                .price(new BigDecimal("350000"))
+                .maxPerOrder(5)
+                .availableQuantity(20)
+                .build();
+
+        CheckAndReserveInventoryResponse mockReserveResponse = CheckAndReserveInventoryResponse.builder()
+                .success(true)
+                .reservedItems(List.of(inv1, inv2))
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(mockReserveResponse));
+
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(orderMapper.toResponse(any())).thenReturn(OrderResponse.builder().id(UUID.randomUUID()).build());
+
+        OrderResponse res = orderService.createOrder(userId, request);
+
+        assertThat(res).isNotNull();
+        // Kiểm tra executeWithLock được gọi với showTimeId và các ticketTypeIds
+        verify(inventoryLockService).executeWithLock(eq(showTimeId), eq(List.of(ticketTypeId1, ticketTypeId2)), any(java.util.function.Supplier.class));
     }
 }

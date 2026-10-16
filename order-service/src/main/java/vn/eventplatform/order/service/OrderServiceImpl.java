@@ -1,12 +1,14 @@
 package vn.eventplatform.order.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
@@ -18,6 +20,7 @@ import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderResponse;
+import vn.eventplatform.order.lock.InventoryLockService;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
 
@@ -32,12 +35,13 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class OrderServiceImpl implements OrderService {
 
     private final OrderRepository orderRepository;
     private final OrderMapper orderMapper;
     private final EventServiceClient eventServiceClient;
+    private final InventoryLockService inventoryLockService;
+    private final org.springframework.transaction.support.TransactionOperations transactionOperations;
 
     @Value("${security.internal.secret}")
     private String internalSecret;
@@ -45,13 +49,57 @@ public class OrderServiceImpl implements OrderService {
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd");
     private static final int HOLD_MINUTES = 15;
 
+    @Autowired
+    public OrderServiceImpl(
+            OrderRepository orderRepository,
+            OrderMapper orderMapper,
+            EventServiceClient eventServiceClient,
+            InventoryLockService inventoryLockService,
+            PlatformTransactionManager transactionManager
+    ) {
+        this(orderRepository, orderMapper, eventServiceClient, inventoryLockService, new TransactionTemplate(transactionManager));
+    }
+
+    public OrderServiceImpl(
+            OrderRepository orderRepository,
+            OrderMapper orderMapper,
+            EventServiceClient eventServiceClient,
+            InventoryLockService inventoryLockService,
+            org.springframework.transaction.support.TransactionOperations transactionOperations
+    ) {
+        this.orderRepository = orderRepository;
+        this.orderMapper = orderMapper;
+        this.eventServiceClient = eventServiceClient;
+        this.inventoryLockService = inventoryLockService;
+        this.transactionOperations = transactionOperations;
+    }
+
     @Override
-    @Transactional
     public OrderResponse createOrder(UUID userId, CreateOrderRequest request) {
         if (request.getItems() == null || request.getItems().isEmpty()) {
             throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng phải chứa ít nhất 1 hạng vé");
         }
 
+        // Kiểm tra chống trùng lặp hạng vé trong cùng một đơn hàng
+        Set<UUID> uniqueTicketTypes = new HashSet<>();
+        for (CreateOrderItemRequest item : request.getItems()) {
+            if (!uniqueTicketTypes.add(item.getTicketTypeId())) {
+                throw new AppException(ErrorCode.BAD_REQUEST,
+                        "Danh sách vé đặt không được chứa các hạng vé trùng lặp: " + item.getTicketTypeId());
+            }
+        }
+
+        List<UUID> ticketTypeIds = request.getItems().stream()
+                .map(CreateOrderItemRequest::getTicketTypeId)
+                .toList();
+
+        // Bảo vệ toàn bộ quá trình kiểm tra tồn kho và tạo đơn bằng Redis Distributed Lock theo showTime + ticketTypes
+        return inventoryLockService.executeWithLock(request.getShowTimeId(), ticketTypeIds, () ->
+                transactionOperations.execute(status -> doCreateOrder(userId, request))
+        );
+    }
+
+    private OrderResponse doCreateOrder(UUID userId, CreateOrderRequest request) {
         // 1. Kiểm tra tồn kho trước khi tạo order và tạm giữ chỗ vé (Hold 15 phút)
         List<TicketItemReservationRequest> reservationRequests = request.getItems().stream()
                 .map(item -> TicketItemReservationRequest.builder()
