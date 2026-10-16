@@ -19,13 +19,18 @@ public enum ErrorCode {
 
     // 403 Forbidden
     ACCESS_DENIED("ERR_ACCESS_DENIED", "Bạn không có quyền thực hiện thao tác này", HttpStatus.FORBIDDEN),
+    FORBIDDEN("ERR_FORBIDDEN", "Bạn không có quyền thực hiện thao tác này", HttpStatus.FORBIDDEN),
     ACCOUNT_LOCKED("ERR_ACCOUNT_LOCKED", "Tài khoản của bạn đã bị khóa", HttpStatus.FORBIDDEN),
     ACCOUNT_PENDING_VERIFICATION("ERR_ACCOUNT_PENDING", "Vui lòng kích hoạt tài khoản qua email trước khi đăng nhập", HttpStatus.FORBIDDEN),
 
     // 404 Not Found
+    NOT_FOUND("ERR_NOT_FOUND", "Không tìm thấy dữ liệu yêu cầu", HttpStatus.NOT_FOUND),
     RESOURCE_NOT_FOUND("ERR_NOT_FOUND", "Không tìm thấy dữ liệu yêu cầu", HttpStatus.NOT_FOUND),
     USER_NOT_FOUND("ERR_USER_NOT_FOUND", "Người dùng không tồn tại", HttpStatus.NOT_FOUND),
     ROLE_NOT_FOUND("ERR_ROLE_NOT_FOUND", "Vai trò không tồn tại", HttpStatus.NOT_FOUND),
+
+    // 409 Conflict
+    CONFLICT("ERR_CONFLICT", "Dữ liệu đã tồn tại hoặc xung đột trạng thái", HttpStatus.CONFLICT),
 
     // 500 Internal Server Error
     INTERNAL_SERVER_ERROR("ERR_INTERNAL_SERVER", "Đã xảy ra lỗi hệ thống, vui lòng thử lại sau", HttpStatus.INTERNAL_SERVER_ERROR),
