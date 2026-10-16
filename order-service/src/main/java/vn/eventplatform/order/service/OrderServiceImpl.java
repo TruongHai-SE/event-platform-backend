@@ -13,6 +13,7 @@ import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.order.client.EventServiceClient;
+import vn.eventplatform.order.client.PromotionServiceClient;
 import vn.eventplatform.order.client.dto.*;
 import vn.eventplatform.order.domain.Order;
 import vn.eventplatform.order.domain.OrderItem;
@@ -40,6 +41,7 @@ public class OrderServiceImpl implements OrderService {
     private final OrderRepository orderRepository;
     private final OrderMapper orderMapper;
     private final EventServiceClient eventServiceClient;
+    private final PromotionServiceClient promotionServiceClient;
     private final InventoryLockService inventoryLockService;
     private final org.springframework.transaction.support.TransactionOperations transactionOperations;
 
@@ -54,22 +56,25 @@ public class OrderServiceImpl implements OrderService {
             OrderRepository orderRepository,
             OrderMapper orderMapper,
             EventServiceClient eventServiceClient,
+            PromotionServiceClient promotionServiceClient,
             InventoryLockService inventoryLockService,
             PlatformTransactionManager transactionManager
     ) {
-        this(orderRepository, orderMapper, eventServiceClient, inventoryLockService, new TransactionTemplate(transactionManager));
+        this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, inventoryLockService, new TransactionTemplate(transactionManager));
     }
 
     public OrderServiceImpl(
             OrderRepository orderRepository,
             OrderMapper orderMapper,
             EventServiceClient eventServiceClient,
+            PromotionServiceClient promotionServiceClient,
             InventoryLockService inventoryLockService,
             org.springframework.transaction.support.TransactionOperations transactionOperations
     ) {
         this.orderRepository = orderRepository;
         this.orderMapper = orderMapper;
         this.eventServiceClient = eventServiceClient;
+        this.promotionServiceClient = promotionServiceClient;
         this.inventoryLockService = inventoryLockService;
         this.transactionOperations = transactionOperations;
     }
@@ -148,10 +153,36 @@ public class OrderServiceImpl implements OrderService {
             orderItems.add(orderItem);
         }
 
-        // 3. Tính snapshot discountAmount và totalAmount (tiền thực trả)
-        BigDecimal discount = request.getDiscountAmount() != null && request.getDiscountAmount().compareTo(BigDecimal.ZERO) > 0
-                ? request.getDiscountAmount()
-                : BigDecimal.ZERO;
+        // 3. Gọi promotion-service validate và tính giảm giá, snapshot discount_amount chính thức
+        BigDecimal discount = BigDecimal.ZERO;
+        UUID appliedPromotionId = null;
+
+        String promoCode = request.getPromotionCode() != null && !request.getPromotionCode().isBlank()
+                ? request.getPromotionCode().trim()
+                : null;
+
+        if (promoCode != null) {
+            VoucherValidationRequest voucherRequest = VoucherValidationRequest.builder()
+                    .userId(userId)
+                    .eventId(request.getEventId())
+                    .code(promoCode)
+                    .orderAmount(subtotal)
+                    .build();
+
+            ApiResponse<VoucherCalculationResponse> voucherResponse =
+                    promotionServiceClient.validateVoucher(internalSecret, voucherRequest);
+
+            if (voucherResponse == null || !voucherResponse.isSuccess() || voucherResponse.getData() == null) {
+                throw new AppException(ErrorCode.BAD_REQUEST, "Mã giảm giá không hợp lệ hoặc không đủ điều kiện áp dụng");
+            }
+
+            VoucherCalculationResponse calculation = voucherResponse.getData();
+            appliedPromotionId = calculation.getPromotionId();
+            discount = calculation.getDiscountAmount() != null ? calculation.getDiscountAmount() : BigDecimal.ZERO;
+        } else if (request.getDiscountAmount() != null) {
+            appliedPromotionId = request.getPromotionId();
+            discount = request.getDiscountAmount().max(BigDecimal.ZERO);
+        }
 
         if (discount.compareTo(subtotal) > 0) {
             discount = subtotal;
@@ -165,13 +196,13 @@ public class OrderServiceImpl implements OrderService {
         // 5. Thiết lập thời gian giữ chỗ 15 phút theo schema
         Instant expiresAt = Instant.now().plus(HOLD_MINUTES, ChronoUnit.MINUTES);
 
-        // 6. Khởi tạo Entity Order kèm snapshot số tiền
+        // 6. Khởi tạo Entity Order kèm snapshot số tiền và mã giảm giá
         Order order = Order.builder()
                 .orderCode(orderCode)
                 .userId(userId)
                 .eventId(request.getEventId())
                 .showTimeId(request.getShowTimeId())
-                .promotionId(request.getPromotionId())
+                .promotionId(appliedPromotionId)
                 .subtotal(subtotal)
                 .discountAmount(discount)
                 .totalAmount(totalAmount)

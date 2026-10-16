@@ -39,6 +39,8 @@ public class CreateOrderRequest {
 
     private String customerPhone;
 
+    private String promotionCode;
+
     private UUID promotionId;
 
     private BigDecimal discountAmount;
