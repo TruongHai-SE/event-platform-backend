@@ -10,6 +10,7 @@ import vn.eventplatform.event.domain.ShowTime;
 import vn.eventplatform.event.domain.ShowTimeTicketInventory;
 import vn.eventplatform.event.domain.TicketType;
 import vn.eventplatform.event.domain.enums.EventStatus;
+import vn.eventplatform.event.domain.enums.InventoryUpdateStatus;
 import vn.eventplatform.event.domain.enums.ShowTimeStatus;
 import vn.eventplatform.event.dto.InternalInventoryDto;
 import vn.eventplatform.event.repository.EventRepository;
@@ -93,7 +94,8 @@ public class InventoryInternalService {
                         "Số lượng đặt cho loại vé '" + tt.getName() + "' vượt quá giới hạn tối đa mỗi đơn (" + tt.getMaxPerOrder() + ")");
             }
             int updatedRows = inventoryRepository.reserveInventorySlot(inv.getId(), qty);
-            if (updatedRows != 1) {
+            InventoryUpdateStatus status = InventoryUpdateStatus.fromUpdatedRows(updatedRows);
+            if (status != InventoryUpdateStatus.SUCCESS) {
                 throw new AppException(ErrorCode.CONFLICT,
                         "Loại vé '" + tt.getName() + "' không đủ số lượng trống (còn lại: " + inv.getAvailableQuantity() + ")");
             }
@@ -138,7 +140,8 @@ public class InventoryInternalService {
                 continue;
             }
             int updatedRows = inventoryRepository.releaseInventorySlot(inv.getId(), releaseQty);
-            if (updatedRows == 1) {
+            InventoryUpdateStatus status = InventoryUpdateStatus.fromUpdatedRows(updatedRows);
+            if (status == InventoryUpdateStatus.SUCCESS) {
                 inv.setReservedQuantity(inv.getReservedQuantity() - releaseQty);
             } else {
                 inv.setReservedQuantity(Math.max(0, inv.getReservedQuantity() - releaseQty));
@@ -170,7 +173,8 @@ public class InventoryInternalService {
                 continue;
             }
             int updatedRows = inventoryRepository.confirmInventorySlot(inv.getId(), confirmQty);
-            if (updatedRows != 1) {
+            InventoryUpdateStatus status = InventoryUpdateStatus.fromUpdatedRows(updatedRows);
+            if (status != InventoryUpdateStatus.SUCCESS) {
                 throw new AppException(ErrorCode.CONFLICT,
                         "Số lượng vé giữ chỗ không đủ để xác nhận xuất vé cho loại vé " + inv.getTicketType().getName());
             }
