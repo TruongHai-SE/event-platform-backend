@@ -1,0 +1,38 @@
+eureka:
+  client:
+    enabled: false
+    register-with-eureka: false
+    fetch-registry: false
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:event_events_test_db;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
+  cloud:
+    discovery:
+      enabled: false
+
+security:
+  token:
+    secret-key: test_dummy_jwt_secret_key_for_unit_tests_must_be_256_bits_long_abcdef123456
+  internal:
+    secret: test_internal_secret_for_mock_verification
+
+cloudinary:
+  cloud-name: ""
+  api-key: ""
+  api-secret: ""
+  root-folder: mss301-event-platform
+
+storage:
+  local-dir: target/test-uploads
