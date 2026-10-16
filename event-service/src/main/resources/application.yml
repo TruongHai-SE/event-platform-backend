@@ -1,0 +1,44 @@
+server:
+  port: ${EVENT_SERVICE_PORT:8087}
+
+spring:
+  application:
+    name: event-service
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5434}/${EVENT_DB_NAME:event_events_db}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        default_batch_fetch_size: 50
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+security:
+  token:
+    secret-key: ${TOKEN_SECRET_KEY:default_dev_secret_key_for_event_platform_must_be_at_least_32_bytes}
+  internal:
+    secret: ${INTERNAL_API_SECRET:default_internal_api_secret_token}
+
+cloudinary:
+  cloud-name: ${CLOUDINARY_CLOUD_NAME:}
+  api-key: ${CLOUDINARY_API_KEY:}
+  api-secret: ${CLOUDINARY_API_SECRET:}
+  root-folder: ${CLOUDINARY_ROOT_FOLDER:mss301-event-platform}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:8761/eureka/
