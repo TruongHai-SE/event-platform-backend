@@ -92,13 +92,13 @@ public class InventoryInternalService {
                 throw new AppException(ErrorCode.BAD_REQUEST,
                         "Số lượng đặt cho loại vé '" + tt.getName() + "' vượt quá giới hạn tối đa mỗi đơn (" + tt.getMaxPerOrder() + ")");
             }
-            if (inv.getAvailableQuantity() < qty) {
+            int updatedRows = inventoryRepository.reserveInventorySlot(inv.getId(), qty);
+            if (updatedRows != 1) {
                 throw new AppException(ErrorCode.CONFLICT,
                         "Loại vé '" + tt.getName() + "' không đủ số lượng trống (còn lại: " + inv.getAvailableQuantity() + ")");
             }
 
             inv.setReservedQuantity(inv.getReservedQuantity() + qty);
-            inventoryRepository.save(inv);
 
             reservedItems.add(InternalInventoryDto.TicketTypeInventoryDto.builder()
                     .ticketTypeId(tt.getId())
@@ -134,8 +134,16 @@ public class InventoryInternalService {
 
         for (ShowTimeTicketInventory inv : lockedInventories) {
             int releaseQty = releaseQuantities.getOrDefault(inv.getTicketType().getId(), 0);
-            inv.setReservedQuantity(Math.max(0, inv.getReservedQuantity() - releaseQty));
-            inventoryRepository.save(inv);
+            if (releaseQty <= 0) {
+                continue;
+            }
+            int updatedRows = inventoryRepository.releaseInventorySlot(inv.getId(), releaseQty);
+            if (updatedRows == 1) {
+                inv.setReservedQuantity(inv.getReservedQuantity() - releaseQty);
+            } else {
+                inv.setReservedQuantity(Math.max(0, inv.getReservedQuantity() - releaseQty));
+                inventoryRepository.save(inv);
+            }
         }
     }
 
@@ -158,13 +166,16 @@ public class InventoryInternalService {
 
         for (ShowTimeTicketInventory inv : lockedInventories) {
             int confirmQty = confirmQuantities.getOrDefault(inv.getTicketType().getId(), 0);
-            if (inv.getReservedQuantity() < confirmQty) {
+            if (confirmQty <= 0) {
+                continue;
+            }
+            int updatedRows = inventoryRepository.confirmInventorySlot(inv.getId(), confirmQty);
+            if (updatedRows != 1) {
                 throw new AppException(ErrorCode.CONFLICT,
                         "Số lượng vé giữ chỗ không đủ để xác nhận xuất vé cho loại vé " + inv.getTicketType().getName());
             }
             inv.setReservedQuantity(inv.getReservedQuantity() - confirmQty);
             inv.setSoldQuantity(inv.getSoldQuantity() + confirmQty);
-            inventoryRepository.save(inv);
         }
     }
 

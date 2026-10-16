@@ -14,8 +14,11 @@ import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.order.client.EventServiceClient;
 import vn.eventplatform.order.client.EventServiceFallback;
+import vn.eventplatform.order.client.PromotionServiceClient;
 import vn.eventplatform.order.client.dto.CheckAndReserveInventoryResponse;
 import vn.eventplatform.order.client.dto.TicketTypeInventoryDto;
+import vn.eventplatform.order.client.dto.VoucherCalculationResponse;
+import vn.eventplatform.order.client.dto.VoucherValidationRequest;
 import vn.eventplatform.order.domain.Order;
 import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
@@ -50,6 +53,9 @@ class OrderServiceTest {
     private EventServiceClient eventServiceClient;
 
     @Mock
+    private PromotionServiceClient promotionServiceClient;
+
+    @Mock
     private vn.eventplatform.order.lock.InventoryLockService inventoryLockService;
 
     private final org.springframework.transaction.support.TransactionOperations transactionOperations =
@@ -72,7 +78,7 @@ class OrderServiceTest {
             return action.get();
         });
 
-        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, inventoryLockService, transactionOperations);
+        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
     }
 
@@ -212,7 +218,7 @@ class OrderServiceTest {
         // Seed tồn kho 5 vé giá 300,000
         fallback.seedInventory(showTimeId, ticketTypeId, "Vé VIP", new BigDecimal("300000"), 5, 10);
 
-        OrderServiceImpl serviceWithFallback = new OrderServiceImpl(orderRepository, orderMapper, fallback, inventoryLockService, transactionOperations);
+        OrderServiceImpl serviceWithFallback = new OrderServiceImpl(orderRepository, orderMapper, fallback, promotionServiceClient, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(serviceWithFallback, "internalSecret", "secret");
 
         UUID userId = UUID.randomUUID();
@@ -445,5 +451,131 @@ class OrderServiceTest {
         assertThat(res).isNotNull();
         // Kiểm tra executeWithLock được gọi với showTimeId và các ticketTypeIds
         verify(inventoryLockService).executeWithLock(eq(showTimeId), eq(List.of(ticketTypeId1, ticketTypeId2)), any(java.util.function.Supplier.class));
+    }
+
+    @Test
+    @DisplayName("Gọi Promotion Service validate voucher và lưu snapshot discount_amount, applied_promotion_id vào Order")
+    void shouldValidatePromotionCodeAndSnapshotDiscount() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        String promoCode = "SUMMER2026";
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(2)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Voucher User")
+                .customerEmail("voucher@example.com")
+                .promotionCode(promoCode)
+                .items(List.of(item))
+                .build();
+
+        // Subtotal = 2 * 300,000 = 600,000
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé Standard")
+                .price(new BigDecimal("300000"))
+                .maxPerOrder(10)
+                .availableQuantity(50)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        VoucherCalculationResponse voucherCalc = VoucherCalculationResponse.builder()
+                .promotionId(promoId)
+                .code(promoCode)
+                .discountAmount(new BigDecimal("100000"))
+                .payableAmount(new BigDecimal("500000"))
+                .build();
+
+        when(promotionServiceClient.validateVoucher(eq("test-internal-secret"), any(VoucherValidationRequest.class)))
+                .thenReturn(ApiResponse.ok(voucherCalc));
+
+        when(orderRepository.save(any(Order.class))).thenAnswer(i -> i.getArgument(0));
+        when(orderMapper.toResponse(any(Order.class))).thenAnswer(i -> {
+            Order o = i.getArgument(0);
+            return OrderResponse.builder()
+                    .subtotal(o.getSubtotal())
+                    .discountAmount(o.getDiscountAmount())
+                    .totalAmount(o.getTotalAmount())
+                    .build();
+        });
+
+        OrderResponse response = orderService.createOrder(userId, request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getSubtotal()).isEqualByComparingTo(new BigDecimal("600000"));
+        assertThat(response.getDiscountAmount()).isEqualByComparingTo(new BigDecimal("100000"));
+        assertThat(response.getTotalAmount()).isEqualByComparingTo(new BigDecimal("500000"));
+
+        verify(promotionServiceClient).validateVoucher(eq("test-internal-secret"), argThat(req ->
+                req.getUserId().equals(userId)
+                        && req.getEventId().equals(eventId)
+                        && req.getCode().equals(promoCode)
+                        && req.getOrderAmount().compareTo(new BigDecimal("600000")) == 0
+        ));
+
+        verify(orderRepository).save(orderCaptor.capture());
+        Order savedOrder = orderCaptor.getValue();
+        assertThat(savedOrder.getPromotionId()).isEqualTo(promoId);
+        assertThat(savedOrder.getDiscountAmount()).isEqualByComparingTo(new BigDecimal("100000"));
+        assertThat(savedOrder.getTotalAmount()).isEqualByComparingTo(new BigDecimal("500000"));
+    }
+
+    @Test
+    @DisplayName("Ném ngoại lệ khi Promotion Service từ chối voucher hoặc trả về lỗi")
+    void shouldThrowWhenPromotionServiceRejectsVoucher() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Voucher User")
+                .customerEmail("voucher@example.com")
+                .promotionCode("EXPIRED_CODE")
+                .items(List.of(item))
+                .build();
+
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé Standard")
+                .price(new BigDecimal("200000"))
+                .maxPerOrder(10)
+                .availableQuantity(50)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        when(promotionServiceClient.validateVoucher(eq("test-internal-secret"), any(VoucherValidationRequest.class)))
+                .thenReturn(ApiResponse.error("ERR_BAD_REQUEST", "Mã giảm giá đã hết lượt"));
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Mã giảm giá không hợp lệ hoặc không đủ điều kiện áp dụng");
+
+        verify(orderRepository, never()).save(any());
     }
 }
