@@ -351,43 +351,50 @@ public class OrderServiceImpl implements OrderService {
             return;
         }
 
-        List<UUID> ticketTypeIds = order.getItems().stream()
+        Instant now = Instant.now();
+        if (order.getExpiresAt() != null && order.getExpiresAt().isAfter(now)) {
+            log.debug("Đơn hàng {} chưa quá hạn (expiresAt={}), bỏ qua expireOrder", order.getOrderCode(), order.getExpiresAt());
+            return;
+        }
+
+        List<UUID> ticketTypeIds = order.getItems() != null ? order.getItems().stream()
                 .map(OrderItem::getTicketTypeId)
                 .filter(Objects::nonNull)
                 .distinct()
-                .toList();
-
-        if (ticketTypeIds.isEmpty()) {
-            transactionOperations.execute(status -> {
-                order.setStatus(OrderStatus.EXPIRED);
-                orderRepository.save(order);
-                releaseVoucherForOrder(order, "EXPIRED");
-                return null;
-            });
-            return;
-        }
+                .toList() : List.of();
 
         UUID orderId = order.getId();
         UUID showTimeId = order.getShowTimeId();
 
-        inventoryLockService.executeWithLock(showTimeId, ticketTypeIds, () ->
-                transactionOperations.execute(status -> {
-                    Order currentOrder = orderRepository.findByIdWithItems(orderId).orElse(order);
-                    if (currentOrder.getStatus() != OrderStatus.PENDING) {
-                        return null;
-                    }
-
-                    currentOrder.setStatus(OrderStatus.EXPIRED);
-                    orderRepository.save(currentOrder);
+        Runnable expireTask = () -> {
+            // Đảm bảo tính Idempotent: Dùng atomic update trong DB để kiểm tra và chuyển trạng thái PENDING -> EXPIRED.
+            // Chỉ duy nhất 1 luồng thành công (rows > 0) mới được phép thực thi side-effects (giải phóng tồn kho & voucher).
+            boolean updated = Boolean.TRUE.equals(transactionOperations.execute(status -> {
+                int rows = orderRepository.updateOrderStatusIfMatch(
+                        orderId, OrderStatus.EXPIRED, OrderStatus.PENDING, Instant.now());
+                if (rows > 0) {
                     order.setStatus(OrderStatus.EXPIRED);
+                    return true;
+                }
+                return false;
+            }));
 
-                    releaseInventoryForOrder(currentOrder);
-                    releaseVoucherForOrder(currentOrder, "EXPIRED");
-                    log.info("Đã chuyển trạng thái hết hạn, giải phóng tồn kho và voucher cho đơn hàng: orderCode={}, showTimeId={}",
-                            currentOrder.getOrderCode(), currentOrder.getShowTimeId());
-                    return null;
-                })
-        );
+            if (updated) {
+                releaseInventoryForOrder(order);
+                releaseVoucherForOrder(order, "EXPIRED");
+                log.info("Đã chuyển trạng thái hết hạn, giải phóng tồn kho và voucher cho đơn hàng: orderCode={}, showTimeId={}",
+                        order.getOrderCode(), order.getShowTimeId());
+            } else {
+                log.debug("Đơn hàng {} không còn ở trạng thái PENDING hoặc đã được xử lý bởi luồng khác, bỏ qua expire",
+                        order.getOrderCode());
+            }
+        };
+
+        if (ticketTypeIds.isEmpty() || showTimeId == null) {
+            expireTask.run();
+        } else {
+            inventoryLockService.executeWithLock(showTimeId, ticketTypeIds, expireTask);
+        }
     }
 
     @Override
@@ -402,7 +409,9 @@ public class OrderServiceImpl implements OrderService {
         for (Order order : expiredOrders) {
             try {
                 expireOrder(order);
-                count++;
+                if (order.getStatus() == OrderStatus.EXPIRED) {
+                    count++;
+                }
             } catch (Exception e) {
                 log.error("Lỗi khi giải phóng tồn kho cho đơn hàng hết hạn: orderCode={}", order.getOrderCode(), e);
             }

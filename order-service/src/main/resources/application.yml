@@ -37,6 +37,9 @@ order:
   expiration-initial-delay-ms: ${ORDER_EXPIRATION_INITIAL_DELAY_MS:10000}
   scheduler:
     enabled: ${ORDER_SCHEDULER_ENABLED:true}
+    lock-key: ${ORDER_SCHEDULER_LOCK_KEY:lock:scheduler:order-expiration}
+    lock-lease-time-seconds: ${ORDER_SCHEDULER_LOCK_LEASE_TIME_SECONDS:25}
+    batch-size: ${ORDER_SCHEDULER_BATCH_SIZE:100}
 
 security:
   token:
