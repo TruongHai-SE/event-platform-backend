@@ -18,6 +18,7 @@ import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.dto.PageResponse;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.order.dto.CreateOrderRequest;
+import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.service.OrderService;
 
@@ -68,6 +69,45 @@ public class OrderController {
         boolean isAdminOrStaff = checkAdminOrStaff(authentication);
         OrderResponse response = orderService.getOrderByCode(orderCode, currentUserId, isAdminOrStaff);
         return ResponseEntity.ok(ApiResponse.ok(response));
+    }
+
+    @GetMapping("/{id}/countdown")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Lấy thông tin đếm ngược thời gian giữ chỗ vé của đơn hàng theo ID")
+    public ResponseEntity<ApiResponse<OrderCountdownResponse>> getOrderCountdown(
+            @PathVariable("id") UUID id,
+            Authentication authentication
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        OrderCountdownResponse response = orderService.getOrderCountdown(id, currentUserId, isAdminOrStaff);
+        return ResponseEntity.ok(ApiResponse.ok(response));
+    }
+
+    @GetMapping("/code/{orderCode}/countdown")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Lấy thông tin đếm ngược thời gian giữ chỗ vé của đơn hàng theo mã đơn hàng")
+    public ResponseEntity<ApiResponse<OrderCountdownResponse>> getOrderCountdownByCode(
+            @PathVariable("orderCode") String orderCode,
+            Authentication authentication
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        OrderCountdownResponse response = orderService.getOrderCountdownByCode(orderCode, currentUserId, isAdminOrStaff);
+        return ResponseEntity.ok(ApiResponse.ok(response));
+    }
+
+    @PostMapping("/{id}/cancel")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Hủy đơn hàng giữ chỗ vé khi chưa thanh toán và giải phóng tồn kho")
+    public ResponseEntity<ApiResponse<OrderResponse>> cancelOrder(
+            @PathVariable("id") UUID id,
+            Authentication authentication
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        OrderResponse response = orderService.cancelOrder(id, currentUserId, isAdminOrStaff);
+        return ResponseEntity.ok(ApiResponse.ok("Hủy đơn hàng thành công, tồn kho vé đã được giải phóng", response));
     }
 
     @GetMapping("/my-orders")

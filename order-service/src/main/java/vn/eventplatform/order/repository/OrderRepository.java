@@ -36,4 +36,7 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
     Optional<Order> findByOrderCodeWithItems(@Param("orderCode") String orderCode);
 
     List<Order> findByStatusAndExpiresAtBefore(OrderStatus status, Instant now);
+
+    @Query("SELECT DISTINCT o FROM Order o LEFT JOIN FETCH o.items WHERE o.status = :status AND o.expiresAt < :now")
+    List<Order> findByStatusAndExpiresAtBeforeWithItems(@Param("status") OrderStatus status, @Param("now") Instant now);
 }
