@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.*;
 import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.promotion.dto.promotion.PromotionRequest;
 import vn.eventplatform.promotion.dto.promotion.PromotionResponse;
+import vn.eventplatform.promotion.dto.promotion.PromotionUsageResponse;
 import vn.eventplatform.promotion.service.promotion.impl.PromotionService;
 
 import java.util.List;
@@ -34,6 +35,11 @@ public class OrganizerVoucherController {
     @GetMapping("/{id}")
     public ResponseEntity<ApiResponse<PromotionResponse>> findById(@PathVariable UUID id) {
         return ResponseEntity.ok(ApiResponse.ok(promotionService.findByIdForOrganizer(id)));
+    }
+
+    @GetMapping("/{id}/usages")
+    public ResponseEntity<ApiResponse<List<PromotionUsageResponse>>> usageHistory(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(promotionService.findUsageHistoryForOrganizer(id)));
     }
 
     @PutMapping("/{id}")

@@ -9,11 +9,13 @@ import org.springframework.transaction.annotation.Transactional;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.promotion.domain.Promotion;
+import vn.eventplatform.promotion.dto.promotion.PromotionUsageResponse;
 import vn.eventplatform.promotion.dto.promotion.PromotionRequest;
 import vn.eventplatform.promotion.dto.promotion.PromotionResponse;
 import vn.eventplatform.promotion.enums.DiscountType;
 import vn.eventplatform.promotion.mapper.PromotionMapper;
 import vn.eventplatform.promotion.repository.PromotionRepository;
+import vn.eventplatform.promotion.repository.PromotionUsageRepository;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -23,6 +25,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class PromotionService {
     private final PromotionRepository repository;
+    private final PromotionUsageRepository usageRepository;
 
     @Transactional
     public PromotionResponse createForOrganizer(PromotionRequest request) {
@@ -47,6 +50,17 @@ public class PromotionService {
     @Transactional(readOnly = true)
     public PromotionResponse findByIdForOrganizer(UUID id) {
         return PromotionMapper.toResponse(findOrganizerPromotion(id));
+    }
+
+    /**
+     * Returns every recorded use, including usages later released because the order was cancelled or expired.
+     */
+    @Transactional(readOnly = true)
+    public List<PromotionUsageResponse> findUsageHistoryForOrganizer(UUID id) {
+        findOrganizerPromotion(id);
+        return usageRepository.findByPromotionIdOrderByUsedAtDesc(id).stream()
+                .map(PromotionUsageResponse::from)
+                .toList();
     }
 
     @Transactional(readOnly = true)

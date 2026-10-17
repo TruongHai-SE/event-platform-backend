@@ -12,7 +12,9 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import vn.eventplatform.promotion.domain.Promotion;
+import vn.eventplatform.promotion.domain.PromotionUsage;
 import vn.eventplatform.promotion.enums.DiscountType;
+import vn.eventplatform.promotion.enums.PromotionUsageStatus;
 import vn.eventplatform.promotion.repository.PromotionRepository;
 import vn.eventplatform.promotion.repository.PromotionUsageRepository;
 import vn.eventplatform.promotion.repository.UserPromotionRepository;
@@ -20,6 +22,7 @@ import vn.eventplatform.promotion.repository.UserPromotionRepository;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -138,6 +141,38 @@ class InternalVoucherControllerIntegrationTest {
                 .andExpect(status().isOk());
 
         mockMvc.perform(get("/api/v1/organizer/vouchers/{id}", promotionId)
+                        .header("Authorization", token(UUID.randomUUID(), "ROLE_ORGANIZER")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void organizerCanViewDetailedUsageHistoryForOwnVoucherOnly() throws Exception {
+        UUID organizerId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+        Promotion promotion = promotionRepository.save(Promotion.builder()
+                .organizerId(organizerId).code("HIST" + UUID.randomUUID().toString().substring(0, 6))
+                .discountType(DiscountType.FIXED_AMOUNT).discountValue(new BigDecimal("20"))
+                .usedCount(1).isActive(true).isCompensation(false).build());
+        UUID promotionId = promotion.getId();
+        usageRepository.save(PromotionUsage.builder().promotionId(promotionId).userId(userId).orderId(orderId)
+                .discountAmount(new BigDecimal("20.00")).status(PromotionUsageStatus.USED)
+                .usedAt(LocalDateTime.of(2026, 10, 17, 10, 0)).build());
+        usageRepository.save(PromotionUsage.builder().promotionId(promotionId).userId(UUID.randomUUID()).orderId(UUID.randomUUID())
+                .discountAmount(new BigDecimal("15.00")).status(PromotionUsageStatus.REVOKED)
+                .usedAt(LocalDateTime.of(2026, 10, 17, 9, 0)).build());
+
+        mockMvc.perform(get("/api/v1/organizer/vouchers/{id}/usages", promotionId)
+                        .header("Authorization", token(organizerId, "ROLE_ORGANIZER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data[0].userId").value(userId.toString()))
+                .andExpect(jsonPath("$.data[0].orderId").value(orderId.toString()))
+                .andExpect(jsonPath("$.data[0].discountAmount").value(20))
+                .andExpect(jsonPath("$.data[0].status").value("USED"))
+                .andExpect(jsonPath("$.data[1].status").value("REVOKED"));
+
+        mockMvc.perform(get("/api/v1/organizer/vouchers/{id}/usages", promotionId)
                         .header("Authorization", token(UUID.randomUUID(), "ROLE_ORGANIZER")))
                 .andExpect(status().isForbidden());
     }

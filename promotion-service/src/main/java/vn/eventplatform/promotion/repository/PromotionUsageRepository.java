@@ -21,6 +21,8 @@ public interface PromotionUsageRepository
 
     List<PromotionUsage> findByPromotionId(UUID promotionId);
 
+    List<PromotionUsage> findByPromotionIdOrderByUsedAtDesc(UUID promotionId);
+
     List<PromotionUsage> findByUserIdAndPromotionId(
             UUID userId,
             UUID promotionId
