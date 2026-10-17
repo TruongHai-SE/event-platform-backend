@@ -5,6 +5,29 @@ eureka:
     fetch-registry: false
 
 spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+  datasource:
+    url: jdbc:h2:mem:auth_test_db;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
+  data:
+    redis:
+      timeout: 200ms
+      connect-timeout: 200ms
+      repositories:
+        enabled: false
   cloud:
     discovery:
       enabled: false
@@ -14,7 +37,7 @@ spring:
 
 security:
   brevo:
-    api-key: test-mock-brevo-api-key
+    api-key:
   token:
     secret-key: test_dummy_jwt_secret_key_for_unit_tests_must_be_256_bits_long_abcdef123456
   oauth2:
@@ -25,4 +48,3 @@ security:
     from-name: Test Platform
   internal:
     secret: test_internal_secret_for_mock_verification
-

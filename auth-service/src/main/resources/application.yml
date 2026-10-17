@@ -20,24 +20,32 @@ spring:
     enabled: true
     baseline-on-migrate: true
     locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 1000ms
+      connect-timeout: 1000ms
+      repositories:
+        enabled: false
 
 security:
   brevo:
-    api-key: ${BREVO_API_KEY}
+    api-key: ${BREVO_API_KEY:}
   token:
-    secret-key: ${TOKEN_SECRET_KEY}
+    secret-key: ${TOKEN_SECRET_KEY:default_dev_secret_key_for_event_platform_must_be_at_least_32_bytes}
     access-expiration-ms: ${TOKEN_ACCESS_EXPIRATION_MS:900000} # 15 minutes
     refresh-expiration-days: ${TOKEN_REFRESH_EXPIRATION_DAYS:7} # 7 days
     cookie-secure: ${COOKIE_SECURE:false}
     cookie-same-site: ${COOKIE_SAME_SITE:Lax}
   oauth2:
     google:
-      client-id: ${GOOGLE_CLIENT_ID}
+      client-id: ${GOOGLE_CLIENT_ID:default-google-client-id.apps.googleusercontent.com}
   mail:
-    from-email: ${MAIL_FROM}
+    from-email: ${MAIL_FROM:noreply@eventplatform.vn}
     from-name: ${MAIL_FROM_NAME:Event and Festival Platform}
   internal:
-    secret: ${INTERNAL_API_SECRET}
+    secret: ${INTERNAL_API_SECRET:default_internal_api_secret_token}
 
 eureka:
   client:

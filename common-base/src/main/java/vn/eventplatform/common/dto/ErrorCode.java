@@ -32,6 +32,9 @@ public enum ErrorCode {
     // 409 Conflict
     CONFLICT("ERR_CONFLICT", "Dữ liệu đã tồn tại hoặc xung đột trạng thái", HttpStatus.CONFLICT),
 
+    // 429 Too Many Requests
+    TOO_MANY_REQUESTS("ERR_TOO_MANY_REQUESTS", "Quá nhiều yêu cầu, vui lòng thử lại sau", HttpStatus.TOO_MANY_REQUESTS),
+
     // 500 Internal Server Error
     INTERNAL_SERVER_ERROR("ERR_INTERNAL_SERVER", "Đã xảy ra lỗi hệ thống, vui lòng thử lại sau", HttpStatus.INTERNAL_SERVER_ERROR),
     MAIL_SENDING_FAILED("ERR_MAIL_SENDING", "Không thể gửi email xác thực, vui lòng thử lại sau", HttpStatus.INTERNAL_SERVER_ERROR);

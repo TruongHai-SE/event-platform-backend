@@ -23,12 +23,16 @@ public class VerificationToken {
     @JoinColumn(name = "account_id", nullable = false)
     private Account account;
 
-    @Column(name = "token_value", nullable = false, unique = true)
+    @Column(name = "token_value", nullable = false)
     private String tokenValue;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "token_type", nullable = false, length = 50)
     private VerificationTokenType tokenType;
+
+    @Column(name = "attempt_count", nullable = false)
+    @Builder.Default
+    private int attemptCount = 0;
 
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
