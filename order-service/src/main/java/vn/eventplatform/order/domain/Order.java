@@ -75,6 +75,7 @@ public class Order extends BaseAuditableEntity {
     private Instant expiresAt;
 
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    @org.hibernate.annotations.BatchSize(size = 20)
     @Builder.Default
     private List<OrderItem> items = new ArrayList<>();
 

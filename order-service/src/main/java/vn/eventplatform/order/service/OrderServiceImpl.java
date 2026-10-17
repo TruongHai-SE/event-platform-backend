@@ -22,9 +22,11 @@ import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderResponse;
+import org.springframework.data.jpa.domain.Specification;
 import vn.eventplatform.order.lock.InventoryLockService;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
+import vn.eventplatform.order.dto.OrderFilterRequest;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -272,9 +274,45 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     @Transactional(readOnly = true)
-    public Page<OrderResponse> getMyOrders(UUID userId, Pageable pageable) {
-        Page<Order> orders = orderRepository.findByUserId(userId, pageable);
+    public Page<OrderResponse> getOrders(OrderFilterRequest filter, UUID currentUserId, boolean isAdminOrStaff, Pageable pageable) {
+        if (filter == null) {
+            filter = new OrderFilterRequest();
+        }
+
+        // Kiểm tra phân quyền:
+        // - Admin/Staff: Có thể lấy tất cả đơn hàng (nếu filter.userId == null), hoặc lọc theo userId cụ thể nếu muốn.
+        // - User thường: CHỈ có thể xem đơn hàng của chính mình (IDOR protection: filter.userId luôn bị ép buộc thành currentUserId).
+        UUID effectiveUserId = isAdminOrStaff ? filter.getUserId() : currentUserId;
+
+        Specification<Order> spec = OrderSpecification.filterOrders(
+                effectiveUserId,
+                filter.getStatus(),
+                filter.getOrderCode(),
+                filter.getEventId(),
+                filter.getShowTimeId(),
+                filter.getKeyword(),
+                filter.getFromDate(),
+                filter.getToDate()
+        );
+
+        Page<Order> orders = orderRepository.findAll(spec, pageable);
         return orders.map(orderMapper::toResponse);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Page<OrderResponse> getMyOrders(UUID userId, Pageable pageable) {
+        return getMyOrders(userId, new OrderFilterRequest(), pageable);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Page<OrderResponse> getMyOrders(UUID userId, OrderFilterRequest filter, Pageable pageable) {
+        if (filter == null) {
+            filter = new OrderFilterRequest();
+        }
+        filter.setUserId(userId);
+        return getOrders(filter, userId, false, pageable);
     }
 
     @Override
@@ -301,7 +339,17 @@ public class OrderServiceImpl implements OrderService {
     public OrderResponse cancelOrder(UUID id, UUID currentUserId, boolean isAdminOrStaff) {
         Order order = orderRepository.findByIdWithItems(id)
                 .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng"));
+        return cancelOrderInternal(order, currentUserId, isAdminOrStaff);
+    }
 
+    @Override
+    public OrderResponse cancelOrderByCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff) {
+        Order order = orderRepository.findByOrderCodeWithItems(orderCode)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng với mã: " + orderCode));
+        return cancelOrderInternal(order, currentUserId, isAdminOrStaff);
+    }
+
+    private OrderResponse cancelOrderInternal(Order order, UUID currentUserId, boolean isAdminOrStaff) {
         validateOrderAccess(order, currentUserId, isAdminOrStaff);
 
         if (order.getStatus() != OrderStatus.PENDING) {

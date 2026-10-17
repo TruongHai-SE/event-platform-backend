@@ -25,9 +25,15 @@ import vn.eventplatform.order.client.dto.ReleaseInventoryRequest;
 import vn.eventplatform.order.domain.Order;
 import vn.eventplatform.order.domain.OrderItem;
 import vn.eventplatform.order.domain.OrderStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
+import vn.eventplatform.order.dto.OrderFilterRequest;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
@@ -67,7 +73,7 @@ class OrderServiceTest {
             new org.springframework.transaction.support.TransactionOperations() {
                 @Override
                 public <T> T execute(org.springframework.transaction.support.TransactionCallback<T> action) {
-                    return action.doInTransaction(mock(org.springframework.transaction.TransactionStatus.class));
+                    return action.doInTransaction(new org.springframework.transaction.support.SimpleTransactionStatus());
                 }
             };
 
@@ -1085,5 +1091,191 @@ class OrderServiceTest {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING);
         verify(orderRepository, never()).updateOrderStatusIfMatch(any(), any(), any(), any());
         verify(eventServiceClient, never()).releaseInventory(any(), any());
+    }
+
+    @Test
+    @DisplayName("Lấy danh sách đơn hàng: User thường luôn bị ép buộc chỉ xem đơn của chính mình (chống IDOR)")
+    void shouldGetOrdersForRegularUserEnforcingOwnUserId() {
+        UUID currentUserId = UUID.randomUUID();
+        UUID attackerRequestedUserId = UUID.randomUUID();
+        Pageable pageable = PageRequest.of(0, 10);
+
+        Order order = Order.builder()
+                .id(UUID.randomUUID())
+                .orderCode("TKZ-ORDER-1")
+                .userId(currentUserId)
+                .status(OrderStatus.PENDING)
+                .build();
+        Page<Order> orderPage = new PageImpl<>(List.of(order), pageable, 1);
+
+        when(orderRepository.findAll(any(Specification.class), eq(pageable))).thenReturn(orderPage);
+        when(orderMapper.toResponse(order)).thenReturn(OrderResponse.builder()
+                .id(order.getId())
+                .orderCode(order.getOrderCode())
+                .userId(currentUserId)
+                .build());
+
+        OrderFilterRequest filter = OrderFilterRequest.builder()
+                .userId(attackerRequestedUserId) // User thường cố gắng truyền userId của người khác
+                .status(OrderStatus.PENDING)
+                .build();
+
+        Page<OrderResponse> result = orderService.getOrders(filter, currentUserId, false, pageable);
+
+        assertThat(result).isNotNull();
+        assertThat(result.getContent()).hasSize(1);
+        assertThat(result.getContent().get(0).getUserId()).isEqualTo(currentUserId);
+        verify(orderRepository).findAll(any(Specification.class), eq(pageable));
+    }
+
+    @Test
+    @DisplayName("Lấy danh sách đơn hàng: Admin có thể xem tất cả đơn hoặc lọc theo bất kỳ user nào")
+    void shouldGetOrdersForAdminWithAllOrdersOrFilteredUser() {
+        UUID adminId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+        Pageable pageable = PageRequest.of(0, 10);
+
+        Order order = Order.builder()
+                .id(UUID.randomUUID())
+                .orderCode("TKZ-ORDER-ADMIN")
+                .userId(targetUserId)
+                .status(OrderStatus.PAID)
+                .build();
+        Page<Order> orderPage = new PageImpl<>(List.of(order), pageable, 1);
+
+        when(orderRepository.findAll(any(Specification.class), eq(pageable))).thenReturn(orderPage);
+        when(orderMapper.toResponse(order)).thenReturn(OrderResponse.builder()
+                .id(order.getId())
+                .orderCode(order.getOrderCode())
+                .userId(targetUserId)
+                .build());
+
+        // Admin lọc theo targetUserId
+        OrderFilterRequest filterWithUser = OrderFilterRequest.builder()
+                .userId(targetUserId)
+                .status(OrderStatus.PAID)
+                .build();
+
+        Page<OrderResponse> resultWithUser = orderService.getOrders(filterWithUser, adminId, true, pageable);
+        assertThat(resultWithUser).isNotNull();
+        assertThat(resultWithUser.getContent()).hasSize(1);
+
+        // Admin không truyền userId -> lấy tất cả
+        OrderFilterRequest filterAll = OrderFilterRequest.builder().build();
+        Page<OrderResponse> resultAll = orderService.getOrders(filterAll, adminId, true, pageable);
+        assertThat(resultAll).isNotNull();
+        assertThat(resultAll.getContent()).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("Lấy danh sách đơn hàng của tôi: getMyOrders hỗ trợ lọc và phân trang")
+    void shouldGetMyOrdersWithFilterAndPagination() {
+        UUID currentUserId = UUID.randomUUID();
+        Pageable pageable = PageRequest.of(0, 5);
+
+        Order order = Order.builder()
+                .id(UUID.randomUUID())
+                .orderCode("TKZ-MY-ORDER")
+                .userId(currentUserId)
+                .status(OrderStatus.PAID)
+                .build();
+        Page<Order> orderPage = new PageImpl<>(List.of(order), pageable, 1);
+
+        when(orderRepository.findAll(any(Specification.class), eq(pageable))).thenReturn(orderPage);
+        when(orderMapper.toResponse(order)).thenReturn(OrderResponse.builder()
+                .id(order.getId())
+                .orderCode(order.getOrderCode())
+                .userId(currentUserId)
+                .status(OrderStatus.PAID)
+                .build());
+
+        OrderFilterRequest filter = OrderFilterRequest.builder()
+                .status(OrderStatus.PAID)
+                .keyword("MY-ORDER")
+                .build();
+
+        Page<OrderResponse> result = orderService.getMyOrders(currentUserId, filter, pageable);
+
+        assertThat(result).isNotNull();
+        assertThat(result.getContent()).hasSize(1);
+        assertThat(result.getContent().get(0).getOrderCode()).isEqualTo("TKZ-MY-ORDER");
+    }
+
+    @Test
+    @DisplayName("Hủy đơn hàng theo mã đơn: Thành công khi đơn hàng PENDING và người dùng là chủ đơn")
+    void shouldCancelOrderByCodeSuccessfully() {
+        UUID userId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        String orderCode = "TKZ-20261017-CANCEL01";
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode(orderCode)
+                .userId(userId)
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .build();
+        order.addItem(OrderItem.builder().ticketTypeId(ticketTypeId).quantity(2).build());
+
+        when(orderRepository.findByOrderCodeWithItems(orderCode)).thenReturn(Optional.of(order));
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(orderMapper.toResponse(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0);
+            return OrderResponse.builder()
+                    .id(o.getId())
+                    .orderCode(o.getOrderCode())
+                    .status(o.getStatus())
+                    .build();
+        });
+
+        OrderResponse response = orderService.cancelOrderByCode(orderCode, userId, false);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        verify(eventServiceClient, times(1)).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hủy đơn hàng theo mã đơn: Ném ACCESS_DENIED khi user không phải chủ sở hữu và không phải admin")
+    void shouldThrowAccessDeniedWhenUserCancelsAnotherUsersOrderByCode() {
+        UUID ownerId = UUID.randomUUID();
+        UUID strangerId = UUID.randomUUID();
+        String orderCode = "TKZ-STRANGER";
+
+        Order order = Order.builder()
+                .id(UUID.randomUUID())
+                .orderCode(orderCode)
+                .userId(ownerId)
+                .status(OrderStatus.PENDING)
+                .build();
+
+        when(orderRepository.findByOrderCodeWithItems(orderCode)).thenReturn(Optional.of(order));
+
+        assertThatThrownBy(() -> orderService.cancelOrderByCode(orderCode, strangerId, false))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.ACCESS_DENIED));
+    }
+
+    @Test
+    @DisplayName("Hủy đơn hàng theo mã đơn: Ném BAD_REQUEST khi trạng thái đơn hàng không phải PENDING")
+    void shouldThrowBadRequestWhenCancellingNonPendingOrderByCode() {
+        UUID userId = UUID.randomUUID();
+        String orderCode = "TKZ-PAID";
+
+        Order order = Order.builder()
+                .id(UUID.randomUUID())
+                .orderCode(orderCode)
+                .userId(userId)
+                .status(OrderStatus.PAID)
+                .build();
+
+        when(orderRepository.findByOrderCodeWithItems(orderCode)).thenReturn(Optional.of(order));
+
+        assertThatThrownBy(() -> orderService.cancelOrderByCode(orderCode, userId, false))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST));
     }
 }
