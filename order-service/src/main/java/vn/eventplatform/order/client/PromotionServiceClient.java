@@ -5,7 +5,9 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import vn.eventplatform.common.dto.ApiResponse;
+import vn.eventplatform.order.client.dto.VoucherApplyRequest;
 import vn.eventplatform.order.client.dto.VoucherCalculationResponse;
+import vn.eventplatform.order.client.dto.VoucherReleaseRequest;
 import vn.eventplatform.order.client.dto.VoucherValidationRequest;
 
 @FeignClient(name = "promotion-service", fallback = PromotionServiceFallback.class)
@@ -15,5 +17,17 @@ public interface PromotionServiceClient {
     ApiResponse<VoucherCalculationResponse> validateVoucher(
             @RequestHeader("X-Internal-Secret") String secret,
             @RequestBody VoucherValidationRequest request
+    );
+
+    @PostMapping("/internal/v1/vouchers/apply")
+    ApiResponse<VoucherCalculationResponse> applyVoucher(
+            @RequestHeader("X-Internal-Secret") String secret,
+            @RequestBody VoucherApplyRequest request
+    );
+
+    @PostMapping("/internal/v1/vouchers/release")
+    ApiResponse<Void> releaseVoucher(
+            @RequestHeader("X-Internal-Secret") String secret,
+            @RequestBody VoucherReleaseRequest request
     );
 }
