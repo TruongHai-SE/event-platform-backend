@@ -12,11 +12,18 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
+import vn.eventplatform.common.dto.ErrorCode;
+import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.common.exception.GlobalExceptionHandler;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
+import vn.eventplatform.order.dto.OrderFilterRequest;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.security.SecurityConfiguration;
 import vn.eventplatform.order.security.TokenVerificationFilter;
@@ -227,5 +234,141 @@ class OrderControllerTest {
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.message").value("Hủy đơn hàng thành công, tồn kho vé đã được giải phóng"))
                 .andExpect(jsonPath("$.data.status").value("CANCELLED"));
+    }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333", roles = "USER")
+    @DisplayName("API GET /api/v1/orders: User thường lấy danh sách đơn hàng có phân trang và lọc")
+    void shouldGetOrdersForRegularUser() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        OrderResponse response = OrderResponse.builder()
+                .id(UUID.randomUUID())
+                .orderCode("TKZ-20261017-USER01")
+                .userId(userId)
+                .status(OrderStatus.PENDING)
+                .build();
+
+        Page<OrderResponse> page = new PageImpl<>(List.of(response), PageRequest.of(0, 10), 1);
+        when(orderService.getOrders(any(OrderFilterRequest.class), eq(userId), eq(false), any(Pageable.class)))
+                .thenReturn(page);
+
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("status", "PENDING")
+                        .param("keyword", "TKZ")
+                        .param("page", "0")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.items[0].orderCode").value("TKZ-20261017-USER01"))
+                .andExpect(jsonPath("$.data.totalElements").value(1));
+    }
+
+    @Test
+    @WithMockUser(username = "99999999-9999-9999-9999-999999999999", roles = "ADMIN")
+    @DisplayName("API GET /api/v1/orders: Admin lấy danh sách đơn hàng toàn hệ thống với isAdminOrStaff = true")
+    void shouldGetOrdersForAdmin() throws Exception {
+        UUID adminId = UUID.fromString("99999999-9999-9999-9999-999999999999");
+        UUID otherUserId = UUID.randomUUID();
+        OrderResponse response = OrderResponse.builder()
+                .id(UUID.randomUUID())
+                .orderCode("TKZ-20261017-ADMIN01")
+                .userId(otherUserId)
+                .status(OrderStatus.PAID)
+                .build();
+
+        Page<OrderResponse> page = new PageImpl<>(List.of(response), PageRequest.of(0, 10), 1);
+        when(orderService.getOrders(any(OrderFilterRequest.class), eq(adminId), eq(true), any(Pageable.class)))
+                .thenReturn(page);
+
+        mockMvc.perform(get("/api/v1/orders")
+                        .param("userId", otherUserId.toString())
+                        .param("status", "PAID"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.items[0].orderCode").value("TKZ-20261017-ADMIN01"));
+    }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333")
+    @DisplayName("API GET /api/v1/orders/my-orders: Lấy danh sách đơn hàng của người dùng hiện tại")
+    void shouldGetMyOrdersSuccessfully() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        OrderResponse response = OrderResponse.builder()
+                .id(UUID.randomUUID())
+                .orderCode("TKZ-20261017-MY01")
+                .userId(userId)
+                .status(OrderStatus.PAID)
+                .build();
+
+        Page<OrderResponse> page = new PageImpl<>(List.of(response), PageRequest.of(0, 10), 1);
+        when(orderService.getMyOrders(eq(userId), any(OrderFilterRequest.class), any(Pageable.class)))
+                .thenReturn(page);
+
+        mockMvc.perform(get("/api/v1/orders/my-orders")
+                        .param("status", "PAID"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.items[0].orderCode").value("TKZ-20261017-MY01"));
+    }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333")
+    @DisplayName("API POST /api/v1/orders/code/{orderCode}/cancel hủy đơn hàng theo orderCode thành công")
+    void shouldCancelOrderByCodeSuccessfully() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        String orderCode = "TKZ-20261017-CODE-CANCEL";
+
+        OrderResponse response = OrderResponse.builder()
+                .id(UUID.randomUUID())
+                .orderCode(orderCode)
+                .userId(userId)
+                .status(OrderStatus.CANCELLED)
+                .build();
+
+        when(orderService.cancelOrderByCode(eq(orderCode), eq(userId), eq(false))).thenReturn(response);
+
+        mockMvc.perform(post("/api/v1/orders/code/" + orderCode + "/cancel")
+                        .with(csrf()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.message").value("Hủy đơn hàng thành công, tồn kho vé đã được giải phóng"))
+                .andExpect(jsonPath("$.data.status").value("CANCELLED"));
+    }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333")
+    @DisplayName("API GET /api/v1/orders/{id} trả về 403 khi người dùng không có quyền truy cập đơn của người khác")
+    void shouldReturnForbiddenWhenAccessDenied() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        UUID otherOrderId = UUID.randomUUID();
+
+        when(orderService.getOrderById(eq(otherOrderId), eq(userId), eq(false)))
+                .thenThrow(new AppException(ErrorCode.ACCESS_DENIED, "Bạn không có quyền truy cập đơn hàng này"));
+
+        mockMvc.perform(get("/api/v1/orders/" + otherOrderId))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.message").value("Bạn không có quyền truy cập đơn hàng này"));
+    }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333")
+    @DisplayName("API GET /api/v1/orders/code/{orderCode} trả về thông tin đơn hàng theo mã")
+    void shouldGetOrderByCodeSuccessfully() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        String orderCode = "TKZ-20261017-BYCODE";
+
+        OrderResponse response = OrderResponse.builder()
+                .id(UUID.randomUUID())
+                .orderCode(orderCode)
+                .userId(userId)
+                .build();
+
+        when(orderService.getOrderByCode(eq(orderCode), eq(userId), eq(false))).thenReturn(response);
+
+        mockMvc.perform(get("/api/v1/orders/code/" + orderCode))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.orderCode").value(orderCode));
     }
 }
