@@ -17,7 +17,9 @@ import vn.eventplatform.order.client.EventServiceFallback;
 import vn.eventplatform.order.client.PromotionServiceClient;
 import vn.eventplatform.order.client.dto.CheckAndReserveInventoryResponse;
 import vn.eventplatform.order.client.dto.TicketTypeInventoryDto;
+import vn.eventplatform.order.client.dto.VoucherApplyRequest;
 import vn.eventplatform.order.client.dto.VoucherCalculationResponse;
+import vn.eventplatform.order.client.dto.VoucherReleaseRequest;
 import vn.eventplatform.order.client.dto.VoucherValidationRequest;
 import vn.eventplatform.order.client.dto.ReleaseInventoryRequest;
 import vn.eventplatform.order.domain.Order;
@@ -801,5 +803,181 @@ class OrderServiceTest {
                 .hasMessageContaining("Chỉ có thể hủy đơn hàng khi đang ở trạng thái chờ thanh toán");
 
         verify(eventServiceClient, never()).releaseInventory(any(), any());
+    }
+
+    @Test
+    @DisplayName("Hết hạn đơn hàng: Giải phóng voucher và tồn kho khi quét scheduler đơn có voucher")
+    void shouldReleaseVoucherWhenOrderExpiresByScheduler() {
+        UUID orderId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-EXP-VOUCHER")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .promotionId(promoId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(100))
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .id(UUID.randomUUID())
+                .order(order)
+                .ticketTypeId(ticketTypeId)
+                .quantity(2)
+                .unitPrice(new BigDecimal("200000"))
+                .build();
+        order.setItems(List.of(item));
+
+        when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(order));
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
+        when(promotionServiceClient.releaseVoucher(eq("test-internal-secret"), any(VoucherReleaseRequest.class)))
+                .thenReturn(ApiResponse.ok(null));
+
+        int releasedCount = orderService.releaseExpiredOrders();
+
+        assertThat(releasedCount).isEqualTo(1);
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+
+        verify(promotionServiceClient).releaseVoucher(eq("test-internal-secret"), argThat(req ->
+                req.getOrderId().equals(orderId) && "EXPIRED".equals(req.getReason())));
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hết hạn đơn hàng: Không gọi releaseVoucher nếu đơn hàng không dùng mã giảm giá")
+    void shouldNotReleaseVoucherWhenExpiredOrderHasNoPromotion() {
+        UUID orderId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-EXP-NO-VOUCHER")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .promotionId(null)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(50))
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .id(UUID.randomUUID())
+                .order(order)
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .unitPrice(new BigDecimal("150000"))
+                .build();
+        order.setItems(List.of(item));
+
+        when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(order));
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
+
+        int releasedCount = orderService.releaseExpiredOrders();
+
+        assertThat(releasedCount).isEqualTo(1);
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+
+        verify(promotionServiceClient, never()).releaseVoucher(any(), any());
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hủy đơn hàng: Giải phóng voucher với lý do REVOKED khi người dùng chủ động hủy đơn có voucher")
+    void shouldReleaseVoucherWhenUserActivelyCancelsOrderWithVoucher() {
+        UUID orderId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-CANCEL-VOUCHER")
+                .userId(userId)
+                .showTimeId(showTimeId)
+                .promotionId(promoId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().plusSeconds(500))
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .id(UUID.randomUUID())
+                .order(order)
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .unitPrice(new BigDecimal("100000"))
+                .build();
+        order.setItems(List.of(item));
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(orderRepository.save(any(Order.class))).thenAnswer(i -> i.getArgument(0));
+        when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
+        when(promotionServiceClient.releaseVoucher(eq("test-internal-secret"), any(VoucherReleaseRequest.class)))
+                .thenReturn(ApiResponse.ok(null));
+        when(orderMapper.toResponse(any(Order.class))).thenAnswer(i -> {
+            Order o = i.getArgument(0);
+            return OrderResponse.builder()
+                    .id(o.getId())
+                    .status(o.getStatus())
+                    .build();
+        });
+
+        OrderResponse response = orderService.cancelOrder(orderId, userId, false);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+
+        verify(promotionServiceClient).releaseVoucher(eq("test-internal-secret"), argThat(req ->
+                req.getOrderId().equals(orderId) && "REVOKED".equals(req.getReason())));
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hết hạn đơn hàng: Chịu lỗi khi promotion-service gặp sự cố mà không làm gián đoạn việc quét hết hạn")
+    void shouldToleratePromotionServiceFailureWhenOrderExpires() {
+        UUID orderId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-EXP-FAILSAFE")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .promotionId(promoId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(100))
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .id(UUID.randomUUID())
+                .order(order)
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .unitPrice(new BigDecimal("100000"))
+                .build();
+        order.setItems(List.of(item));
+
+        when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(order));
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
+        when(promotionServiceClient.releaseVoucher(eq("test-internal-secret"), any(VoucherReleaseRequest.class)))
+                .thenThrow(new RuntimeException("promotion-service is down"));
+
+        int releasedCount = orderService.releaseExpiredOrders();
+
+        assertThat(releasedCount).isEqualTo(1);
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
     }
 }

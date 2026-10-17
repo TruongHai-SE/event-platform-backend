@@ -226,6 +226,27 @@ public class OrderServiceImpl implements OrderService {
         log.info("Tạo đơn hàng thành công: orderCode={}, userId={}, eventId={}, subtotal={}, totalAmount={}, expiresAt={}",
                 order.getOrderCode(), userId, order.getEventId(), order.getSubtotal(), order.getTotalAmount(), order.getExpiresAt());
 
+        // 8. Nếu có áp dụng mã giảm giá, gọi promotion-service apply để ghi nhận lượt dùng và chốt slot voucher
+        if (promoCode != null) {
+            try {
+                VoucherApplyRequest applyRequest = VoucherApplyRequest.builder()
+                        .orderId(order.getId())
+                        .userId(userId)
+                        .eventId(request.getEventId())
+                        .code(promoCode)
+                        .orderAmount(subtotal)
+                        .build();
+                ApiResponse<VoucherCalculationResponse> applyResponse =
+                        promotionServiceClient.applyVoucher(internalSecret, applyRequest);
+                if (applyResponse != null && !applyResponse.isSuccess()) {
+                    log.warn("promotion-service trả về lỗi khi áp dụng voucher cho orderCode={}: {}",
+                            order.getOrderCode(), applyResponse.getMessage());
+                }
+            } catch (Exception e) {
+                log.error("Lỗi Feign khi gọi promotion-service applyVoucher cho orderCode={}", order.getOrderCode(), e);
+            }
+        }
+
         return orderMapper.toResponse(order);
     }
 
@@ -296,6 +317,7 @@ public class OrderServiceImpl implements OrderService {
         if (ticketTypeIds.isEmpty()) {
             order.setStatus(OrderStatus.CANCELLED);
             Order saved = orderRepository.save(order);
+            releaseVoucherForOrder(saved, "REVOKED");
             return orderMapper.toResponse(saved);
         }
 
@@ -313,7 +335,8 @@ public class OrderServiceImpl implements OrderService {
                     Order savedOrder = orderRepository.save(currentOrder);
 
                     releaseInventoryForOrder(savedOrder);
-                    log.info("Đã hủy đơn hàng chủ động và giải phóng tồn kho: orderCode={}, showTimeId={}",
+                    releaseVoucherForOrder(savedOrder, "REVOKED");
+                    log.info("Đã hủy đơn hàng chủ động, giải phóng tồn kho và voucher: orderCode={}, showTimeId={}",
                             savedOrder.getOrderCode(), savedOrder.getShowTimeId());
                     return savedOrder;
                 })
@@ -338,6 +361,7 @@ public class OrderServiceImpl implements OrderService {
             transactionOperations.execute(status -> {
                 order.setStatus(OrderStatus.EXPIRED);
                 orderRepository.save(order);
+                releaseVoucherForOrder(order, "EXPIRED");
                 return null;
             });
             return;
@@ -358,7 +382,8 @@ public class OrderServiceImpl implements OrderService {
                     order.setStatus(OrderStatus.EXPIRED);
 
                     releaseInventoryForOrder(currentOrder);
-                    log.info("Đã chuyển trạng thái hết hạn và giải phóng tồn kho cho đơn hàng: orderCode={}, showTimeId={}",
+                    releaseVoucherForOrder(currentOrder, "EXPIRED");
+                    log.info("Đã chuyển trạng thái hết hạn, giải phóng tồn kho và voucher cho đơn hàng: orderCode={}, showTimeId={}",
                             currentOrder.getOrderCode(), currentOrder.getShowTimeId());
                     return null;
                 })
@@ -418,6 +443,30 @@ public class OrderServiceImpl implements OrderService {
             }
         } catch (Exception e) {
             log.error("Lỗi Feign khi gọi event-service releaseInventory cho orderCode={}", order.getOrderCode(), e);
+        }
+    }
+
+    private void releaseVoucherForOrder(Order order, String reason) {
+        if (order == null || order.getPromotionId() == null) {
+            return;
+        }
+
+        VoucherReleaseRequest releaseRequest = VoucherReleaseRequest.builder()
+                .orderId(order.getId())
+                .reason(reason)
+                .build();
+
+        try {
+            ApiResponse<Void> response = promotionServiceClient.releaseVoucher(internalSecret, releaseRequest);
+            if (response != null && !response.isSuccess()) {
+                log.warn("promotion-service trả về lỗi khi giải phóng voucher cho đơn hàng {}: {}",
+                        order.getOrderCode(), response.getMessage());
+            } else {
+                log.info("Đã giải phóng voucher thành công cho đơn hàng: orderCode={}, orderId={}, promotionId={}, reason={}",
+                        order.getOrderCode(), order.getId(), order.getPromotionId(), reason);
+            }
+        } catch (Exception e) {
+            log.error("Lỗi Feign khi gọi promotion-service releaseVoucher cho orderCode={}", order.getOrderCode(), e);
         }
     }
 
