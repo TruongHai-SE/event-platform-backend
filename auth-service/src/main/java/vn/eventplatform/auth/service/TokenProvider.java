@@ -42,14 +42,20 @@ public class TokenProvider {
         Instant expiry = now.plusMillis(accessExpirationMs);
 
         return Jwts.builder()
+                .id(UUID.randomUUID().toString())
                 .subject(accountId.toString())
                 .claim("email", email)
                 .claim("username", username)
                 .claim("roles", roles != null ? roles : Collections.emptyList())
+                .claim("iat_ms", now.toEpochMilli())
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(expiry))
                 .signWith(secretKey)
                 .compact();
+    }
+
+    public long getAccessExpirationMs() {
+        return accessExpirationMs;
     }
 
     public String generateRawRefreshToken() {

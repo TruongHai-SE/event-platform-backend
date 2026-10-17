@@ -29,6 +29,9 @@ public class Account extends BaseAuditableEntity {
     @Column(name = "password_hash")
     private String passwordHash;
 
+    @Column(name = "phone_number", length = 20)
+    private String phoneNumber;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     @Builder.Default

@@ -18,6 +18,8 @@ public interface UserProfileRepository extends JpaRepository<UserProfile, UUID> 
 
     Optional<UserProfile> findByUsername(String username);
 
+    boolean existsByPhoneNumberAndIdNot(String phoneNumber, UUID id);
+
     @Query("SELECT u FROM UserProfile u LEFT JOIN FETCH u.roles WHERE u.id = :id")
     Optional<UserProfile> findByIdWithRoles(@Param("id") UUID id);
 

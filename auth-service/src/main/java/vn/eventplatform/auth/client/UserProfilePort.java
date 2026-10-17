@@ -6,7 +6,7 @@ import vn.eventplatform.common.dto.ApiResponse;
 
 import java.util.UUID;
 
-@FeignClient(name = "user-service")
+@FeignClient(name = "user-service", url = "${USER_SERVICE_URL:}")
 public interface UserProfilePort {
 
     @PostMapping("/internal/v1/users")
