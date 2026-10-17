@@ -91,6 +91,7 @@ class OrderServiceTest {
 
         orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
+        lenient().when(orderRepository.updateOrderStatusIfMatch(any(), any(), any(), any())).thenReturn(1);
     }
 
     @Test
@@ -736,8 +737,6 @@ class OrderServiceTest {
 
         when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
                 .thenReturn(List.of(order1, order2));
-        when(orderRepository.findByIdWithItems(orderId1)).thenReturn(Optional.of(order1));
-        when(orderRepository.findByIdWithItems(orderId2)).thenReturn(Optional.of(order2));
 
         int releasedCount = orderService.releaseExpiredOrders();
 
@@ -834,7 +833,6 @@ class OrderServiceTest {
 
         when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
                 .thenReturn(List.of(order));
-        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
         when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
         when(promotionServiceClient.releaseVoucher(eq("test-internal-secret"), any(VoucherReleaseRequest.class)))
                 .thenReturn(ApiResponse.ok(null));
@@ -877,7 +875,6 @@ class OrderServiceTest {
 
         when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
                 .thenReturn(List.of(order));
-        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
         when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
 
         int releasedCount = orderService.releaseExpiredOrders();
@@ -969,7 +966,6 @@ class OrderServiceTest {
 
         when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
                 .thenReturn(List.of(order));
-        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
         when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
         when(promotionServiceClient.releaseVoucher(eq("test-internal-secret"), any(VoucherReleaseRequest.class)))
                 .thenThrow(new RuntimeException("promotion-service is down"));
@@ -979,5 +975,115 @@ class OrderServiceTest {
         assertThat(releasedCount).isEqualTo(1);
         assertThat(order.getStatus()).isEqualTo(OrderStatus.EXPIRED);
         verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Idempotency: Không gọi giải phóng tồn kho hay voucher nếu trạng thái đơn hàng trong DB không còn là PENDING")
+    void shouldBeStrictlyIdempotentWhenOrderStatusNoLongerPendingInDb() {
+        UUID orderId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-EXP-ALREADY-CHANGED")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .promotionId(UUID.randomUUID())
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(100))
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .id(UUID.randomUUID())
+                .order(order)
+                .ticketTypeId(ticketTypeId)
+                .quantity(2)
+                .unitPrice(new BigDecimal("100000"))
+                .build();
+        order.setItems(List.of(item));
+
+        when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(order));
+        // Giả lập luồng khác hoặc instance khác đã update trạng thái trước đó (rows = 0)
+        when(orderRepository.updateOrderStatusIfMatch(eq(orderId), eq(OrderStatus.EXPIRED), eq(OrderStatus.PENDING), any()))
+                .thenReturn(0);
+
+        int releasedCount = orderService.releaseExpiredOrders();
+
+        // Không đếm vào số lượng giải phóng thành công
+        assertThat(releasedCount).isZero();
+        // Không được gọi external service khi cập nhật trạng thái thất bại
+        verify(eventServiceClient, never()).releaseInventory(any(), any());
+        verify(promotionServiceClient, never()).releaseVoucher(any(), any());
+    }
+
+    @Test
+    @DisplayName("Idempotency: Gọi expireOrder nhiều lần liên tiếp chỉ giải phóng tồn kho và voucher đúng 1 lần")
+    void shouldBeIdempotentWhenExpireOrderCalledMultipleTimes() {
+        UUID orderId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-EXP-MULTI-CALL")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .promotionId(promoId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(50))
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .id(UUID.randomUUID())
+                .order(order)
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .unitPrice(new BigDecimal("150000"))
+                .build();
+        order.setItems(List.of(item));
+
+        when(eventServiceClient.releaseInventory(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
+        when(promotionServiceClient.releaseVoucher(eq("test-internal-secret"), any())).thenReturn(ApiResponse.ok(null));
+        when(orderRepository.updateOrderStatusIfMatch(eq(orderId), eq(OrderStatus.EXPIRED), eq(OrderStatus.PENDING), any()))
+                .thenReturn(1);
+
+        // Gọi lần 1: thành công
+        orderService.expireOrder(order);
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+
+        // Gọi lần 2: order đã ở trạng thái EXPIRED, bỏ qua ngay từ bước validate
+        orderService.expireOrder(order);
+
+        // Xác nhận side-effects chỉ được gọi đúng 1 lần duy nhất
+        verify(eventServiceClient, times(1)).releaseInventory(eq("test-internal-secret"), any());
+        verify(promotionServiceClient, times(1)).releaseVoucher(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hết hạn đơn hàng: Không xử lý hết hạn nếu thời gian giữ chỗ chưa kết thúc")
+    void shouldNotExpireOrderWhenHoldTimeNotExceeded() {
+        UUID orderId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-EXP-FUTURE")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().plusSeconds(300)) // Còn 5 phút giữ chỗ
+                .build();
+
+        order.addItem(OrderItem.builder().ticketTypeId(ticketTypeId).quantity(1).unitPrice(new BigDecimal("100000")).build());
+
+        orderService.expireOrder(order);
+
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING);
+        verify(orderRepository, never()).updateOrderStatusIfMatch(any(), any(), any(), any());
+        verify(eventServiceClient, never()).releaseInventory(any(), any());
     }
 }
