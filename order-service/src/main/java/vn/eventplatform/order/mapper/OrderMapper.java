@@ -1,14 +1,49 @@
 package vn.eventplatform.order.mapper;
 
-import org.mapstruct.Mapper;
-import org.mapstruct.Mapping;
-import org.mapstruct.ReportingPolicy;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
 import vn.eventplatform.order.domain.Order;
+import vn.eventplatform.order.dto.OrderItemResponse;
 import vn.eventplatform.order.dto.OrderResponse;
 
-@Mapper(componentModel = "spring", uses = {OrderItemMapper.class}, unmappedTargetPolicy = ReportingPolicy.IGNORE)
-public interface OrderMapper {
+import java.util.Collections;
+import java.util.List;
 
-    @Mapping(target = "items", source = "items")
-    OrderResponse toResponse(Order order);
+@Component
+@RequiredArgsConstructor
+public class OrderMapper {
+
+    private final OrderItemMapper orderItemMapper;
+
+    public OrderResponse toResponse(Order order) {
+        if (order == null) {
+            return null;
+        }
+
+        List<OrderItemResponse> itemResponses = Collections.emptyList();
+        if (order.getItems() != null) {
+            itemResponses = order.getItems().stream()
+                    .map(orderItemMapper::toResponse)
+                    .toList();
+        }
+
+        return OrderResponse.builder()
+                .id(order.getId())
+                .orderCode(order.getOrderCode())
+                .userId(order.getUserId())
+                .eventId(order.getEventId())
+                .showTimeId(order.getShowTimeId())
+                .promotionId(order.getPromotionId())
+                .subtotal(order.getSubtotal())
+                .discountAmount(order.getDiscountAmount())
+                .totalAmount(order.getTotalAmount())
+                .status(order.getStatus())
+                .customerName(order.getCustomerName())
+                .customerEmail(order.getCustomerEmail())
+                .customerPhone(order.getCustomerPhone())
+                .expiresAt(order.getExpiresAt())
+                .createdAt(order.getCreatedAt())
+                .items(itemResponses)
+                .build();
+    }
 }

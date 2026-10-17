@@ -1,26 +1,44 @@
 package vn.eventplatform.order.mapper;
 
-import org.mapstruct.Mapper;
-import org.mapstruct.Mapping;
-import org.mapstruct.ReportingPolicy;
+import org.springframework.stereotype.Component;
 import vn.eventplatform.order.domain.OrderItem;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.OrderItemResponse;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 
-@Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
-public interface OrderItemMapper {
+@Component
+public class OrderItemMapper {
 
-    @Mapping(target = "subtotal", expression = "java(calculateSubtotal(item))")
-    OrderItemResponse toResponse(OrderItem item);
+    public OrderItemResponse toResponse(OrderItem item) {
+        if (item == null) {
+            return null;
+        }
 
-    @Mapping(target = "id", ignore = true)
-    @Mapping(target = "order", ignore = true)
-    @Mapping(target = "createdAt", expression = "java(java.time.Instant.now())")
-    OrderItem toEntity(CreateOrderItemRequest request);
+        return OrderItemResponse.builder()
+                .id(item.getId())
+                .ticketTypeId(item.getTicketTypeId())
+                .quantity(item.getQuantity())
+                .unitPrice(item.getUnitPrice())
+                .subtotal(calculateSubtotal(item))
+                .build();
+    }
 
-    default BigDecimal calculateSubtotal(OrderItem item) {
+    public OrderItem toEntity(CreateOrderItemRequest request) {
+        if (request == null) {
+            return null;
+        }
+
+        return OrderItem.builder()
+                .ticketTypeId(request.getTicketTypeId())
+                .quantity(request.getQuantity())
+                .unitPrice(request.getUnitPrice())
+                .createdAt(Instant.now())
+                .build();
+    }
+
+    public BigDecimal calculateSubtotal(OrderItem item) {
         if (item == null || item.getUnitPrice() == null || item.getQuantity() == null) {
             return BigDecimal.ZERO;
         }

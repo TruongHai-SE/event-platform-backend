@@ -5,19 +5,17 @@ import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
-import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
-import lombok.NoArgsConstructor;
+import lombok.Setter;
 
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 
 @Getter
+@Setter
 @Builder
-@NoArgsConstructor
-@AllArgsConstructor
 public class CreateOrderRequest {
 
     @NotNull(message = "eventId không được để trống")
@@ -44,4 +42,21 @@ public class CreateOrderRequest {
     private UUID promotionId;
 
     private BigDecimal discountAmount;
+
+    public CreateOrderRequest() {
+    }
+
+    public CreateOrderRequest(UUID eventId, UUID showTimeId, List<CreateOrderItemRequest> items,
+                              String customerName, String customerEmail, String customerPhone,
+                              String promotionCode, UUID promotionId, BigDecimal discountAmount) {
+        this.eventId = eventId;
+        this.showTimeId = showTimeId;
+        this.items = items;
+        this.customerName = customerName;
+        this.customerEmail = customerEmail;
+        this.customerPhone = customerPhone;
+        this.promotionCode = promotionCode;
+        this.promotionId = promotionId;
+        this.discountAmount = discountAmount;
+    }
 }

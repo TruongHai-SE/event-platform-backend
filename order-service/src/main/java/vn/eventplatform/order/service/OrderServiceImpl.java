@@ -20,12 +20,14 @@ import vn.eventplatform.order.domain.OrderItem;
 import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
+import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.lock.InventoryLockService;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -48,8 +50,10 @@ public class OrderServiceImpl implements OrderService {
     @Value("${security.internal.secret}")
     private String internalSecret;
 
+    @Value("${order.hold-minutes:15}")
+    private int holdMinutes = 15;
+
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd");
-    private static final int HOLD_MINUTES = 15;
 
     @Autowired
     public OrderServiceImpl(
@@ -193,8 +197,8 @@ public class OrderServiceImpl implements OrderService {
         // 4. Sinh mã order_code chuẩn TKZ-YYYYMMDD-XXXXX
         String orderCode = generateUniqueOrderCode();
 
-        // 5. Thiết lập thời gian giữ chỗ 15 phút theo schema
-        Instant expiresAt = Instant.now().plus(HOLD_MINUTES, ChronoUnit.MINUTES);
+        // 5. Thiết lập thời gian giữ chỗ 15 phút (mặc định hoặc cấu hình)
+        Instant expiresAt = Instant.now().plus(holdMinutes, ChronoUnit.MINUTES);
 
         // 6. Khởi tạo Entity Order kèm snapshot số tiền và mã giảm giá
         Order order = Order.builder()
@@ -226,22 +230,22 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
-    @Transactional(readOnly = true)
     public OrderResponse getOrderById(UUID id, UUID currentUserId, boolean isAdminOrStaff) {
         Order order = orderRepository.findByIdWithItems(id)
                 .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng"));
 
         validateOrderAccess(order, currentUserId, isAdminOrStaff);
+        checkAndHandleExpiredOrder(order);
         return orderMapper.toResponse(order);
     }
 
     @Override
-    @Transactional(readOnly = true)
     public OrderResponse getOrderByCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff) {
         Order order = orderRepository.findByOrderCodeWithItems(orderCode)
                 .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng với mã: " + orderCode));
 
         validateOrderAccess(order, currentUserId, isAdminOrStaff);
+        checkAndHandleExpiredOrder(order);
         return orderMapper.toResponse(order);
     }
 
@@ -250,6 +254,198 @@ public class OrderServiceImpl implements OrderService {
     public Page<OrderResponse> getMyOrders(UUID userId, Pageable pageable) {
         Page<Order> orders = orderRepository.findByUserId(userId, pageable);
         return orders.map(orderMapper::toResponse);
+    }
+
+    @Override
+    public OrderCountdownResponse getOrderCountdown(UUID id, UUID currentUserId, boolean isAdminOrStaff) {
+        Order order = orderRepository.findByIdWithItems(id)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng"));
+
+        validateOrderAccess(order, currentUserId, isAdminOrStaff);
+        checkAndHandleExpiredOrder(order);
+        return buildCountdownResponse(order);
+    }
+
+    @Override
+    public OrderCountdownResponse getOrderCountdownByCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff) {
+        Order order = orderRepository.findByOrderCodeWithItems(orderCode)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng với mã: " + orderCode));
+
+        validateOrderAccess(order, currentUserId, isAdminOrStaff);
+        checkAndHandleExpiredOrder(order);
+        return buildCountdownResponse(order);
+    }
+
+    @Override
+    public OrderResponse cancelOrder(UUID id, UUID currentUserId, boolean isAdminOrStaff) {
+        Order order = orderRepository.findByIdWithItems(id)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng"));
+
+        validateOrderAccess(order, currentUserId, isAdminOrStaff);
+
+        if (order.getStatus() != OrderStatus.PENDING) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Chỉ có thể hủy đơn hàng khi đang ở trạng thái chờ thanh toán (PENDING)");
+        }
+
+        List<UUID> ticketTypeIds = order.getItems().stream()
+                .map(OrderItem::getTicketTypeId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        if (ticketTypeIds.isEmpty()) {
+            order.setStatus(OrderStatus.CANCELLED);
+            Order saved = orderRepository.save(order);
+            return orderMapper.toResponse(saved);
+        }
+
+        UUID orderId = order.getId();
+        UUID showTimeId = order.getShowTimeId();
+
+        Order cancelledOrder = inventoryLockService.executeWithLock(showTimeId, ticketTypeIds, () ->
+                transactionOperations.execute(status -> {
+                    Order currentOrder = orderRepository.findByIdWithItems(orderId).orElse(order);
+                    if (currentOrder.getStatus() != OrderStatus.PENDING) {
+                        throw new AppException(ErrorCode.BAD_REQUEST, "Trạng thái đơn hàng đã thay đổi, không thể hủy");
+                    }
+
+                    currentOrder.setStatus(OrderStatus.CANCELLED);
+                    Order savedOrder = orderRepository.save(currentOrder);
+
+                    releaseInventoryForOrder(savedOrder);
+                    log.info("Đã hủy đơn hàng chủ động và giải phóng tồn kho: orderCode={}, showTimeId={}",
+                            savedOrder.getOrderCode(), savedOrder.getShowTimeId());
+                    return savedOrder;
+                })
+        );
+
+        return orderMapper.toResponse(cancelledOrder);
+    }
+
+    @Override
+    public void expireOrder(Order order) {
+        if (order == null || order.getStatus() != OrderStatus.PENDING) {
+            return;
+        }
+
+        List<UUID> ticketTypeIds = order.getItems().stream()
+                .map(OrderItem::getTicketTypeId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        if (ticketTypeIds.isEmpty()) {
+            transactionOperations.execute(status -> {
+                order.setStatus(OrderStatus.EXPIRED);
+                orderRepository.save(order);
+                return null;
+            });
+            return;
+        }
+
+        UUID orderId = order.getId();
+        UUID showTimeId = order.getShowTimeId();
+
+        inventoryLockService.executeWithLock(showTimeId, ticketTypeIds, () ->
+                transactionOperations.execute(status -> {
+                    Order currentOrder = orderRepository.findByIdWithItems(orderId).orElse(order);
+                    if (currentOrder.getStatus() != OrderStatus.PENDING) {
+                        return null;
+                    }
+
+                    currentOrder.setStatus(OrderStatus.EXPIRED);
+                    orderRepository.save(currentOrder);
+                    order.setStatus(OrderStatus.EXPIRED);
+
+                    releaseInventoryForOrder(currentOrder);
+                    log.info("Đã chuyển trạng thái hết hạn và giải phóng tồn kho cho đơn hàng: orderCode={}, showTimeId={}",
+                            currentOrder.getOrderCode(), currentOrder.getShowTimeId());
+                    return null;
+                })
+        );
+    }
+
+    @Override
+    public int releaseExpiredOrders() {
+        Instant now = Instant.now();
+        List<Order> expiredOrders = orderRepository.findByStatusAndExpiresAtBeforeWithItems(OrderStatus.PENDING, now);
+        if (expiredOrders.isEmpty()) {
+            return 0;
+        }
+
+        int count = 0;
+        for (Order order : expiredOrders) {
+            try {
+                expireOrder(order);
+                count++;
+            } catch (Exception e) {
+                log.error("Lỗi khi giải phóng tồn kho cho đơn hàng hết hạn: orderCode={}", order.getOrderCode(), e);
+            }
+        }
+        return count;
+    }
+
+    private void checkAndHandleExpiredOrder(Order order) {
+        if (order.getStatus() == OrderStatus.PENDING
+                && order.getExpiresAt() != null
+                && order.getExpiresAt().isBefore(Instant.now())) {
+            expireOrder(order);
+        }
+    }
+
+    private void releaseInventoryForOrder(Order order) {
+        if (order.getItems() == null || order.getItems().isEmpty()) {
+            return;
+        }
+
+        List<TicketItemReservationRequest> releaseItems = order.getItems().stream()
+                .map(item -> TicketItemReservationRequest.builder()
+                        .ticketTypeId(item.getTicketTypeId())
+                        .quantity(item.getQuantity())
+                        .build())
+                .toList();
+
+        ReleaseInventoryRequest releaseRequest = ReleaseInventoryRequest.builder()
+                .showTimeId(order.getShowTimeId())
+                .items(releaseItems)
+                .build();
+
+        try {
+            ApiResponse<Void> response = eventServiceClient.releaseInventory(internalSecret, releaseRequest);
+            if (response != null && !response.isSuccess()) {
+                log.warn("event-service trả về lỗi khi giải phóng tồn kho đơn hàng {}: {}",
+                        order.getOrderCode(), response.getMessage());
+            }
+        } catch (Exception e) {
+            log.error("Lỗi Feign khi gọi event-service releaseInventory cho orderCode={}", order.getOrderCode(), e);
+        }
+    }
+
+    private OrderCountdownResponse buildCountdownResponse(Order order) {
+        Instant now = Instant.now();
+        Instant expiresAt = order.getExpiresAt();
+        long remainingSeconds = 0L;
+        boolean isExpired = false;
+
+        if (order.getStatus() == OrderStatus.PENDING) {
+            if (expiresAt != null && expiresAt.isAfter(now)) {
+                remainingSeconds = Math.max(0, Duration.between(now, expiresAt).getSeconds());
+            } else {
+                isExpired = true;
+            }
+        } else if (order.getStatus() == OrderStatus.EXPIRED) {
+            isExpired = true;
+        }
+
+        return OrderCountdownResponse.builder()
+                .orderId(order.getId())
+                .orderCode(order.getOrderCode())
+                .status(order.getStatus())
+                .expiresAt(expiresAt)
+                .currentTime(now)
+                .remainingSeconds(remainingSeconds)
+                .isExpired(isExpired)
+                .build();
     }
 
     private void validateOrderAccess(Order order, UUID currentUserId, boolean isAdminOrStaff) {

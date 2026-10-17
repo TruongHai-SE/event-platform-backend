@@ -31,6 +31,13 @@ app:
     wait-time-seconds: ${LOCK_WAIT_TIME_SECONDS:5}
     lease-time-seconds: ${LOCK_LEASE_TIME_SECONDS:-1}
 
+order:
+  hold-minutes: ${ORDER_HOLD_MINUTES:15}
+  expiration-check-interval-ms: ${ORDER_EXPIRATION_CHECK_INTERVAL_MS:30000}
+  expiration-initial-delay-ms: ${ORDER_EXPIRATION_INITIAL_DELAY_MS:10000}
+  scheduler:
+    enabled: ${ORDER_SCHEDULER_ENABLED:true}
+
 security:
   token:
     secret-key: ${TOKEN_SECRET_KEY}

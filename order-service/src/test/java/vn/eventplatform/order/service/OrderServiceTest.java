@@ -19,10 +19,13 @@ import vn.eventplatform.order.client.dto.CheckAndReserveInventoryResponse;
 import vn.eventplatform.order.client.dto.TicketTypeInventoryDto;
 import vn.eventplatform.order.client.dto.VoucherCalculationResponse;
 import vn.eventplatform.order.client.dto.VoucherValidationRequest;
+import vn.eventplatform.order.client.dto.ReleaseInventoryRequest;
 import vn.eventplatform.order.domain.Order;
+import vn.eventplatform.order.domain.OrderItem;
 import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
+import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
@@ -77,6 +80,12 @@ class OrderServiceTest {
             java.util.function.Supplier<?> action = invocation.getArgument(2);
             return action.get();
         });
+
+        lenient().doAnswer(invocation -> {
+            Runnable action = invocation.getArgument(2);
+            action.run();
+            return null;
+        }).when(inventoryLockService).executeWithLock(any(), any(), any(Runnable.class));
 
         orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
@@ -577,5 +586,220 @@ class OrderServiceTest {
                 .hasMessageContaining("Mã giảm giá không hợp lệ hoặc không đủ điều kiện áp dụng");
 
         verify(orderRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Countdown: Trả về thời gian còn lại chính xác khi đơn hàng đang PENDING")
+    void shouldReturnCountdownWithRemainingSecondsWhenOrderIsPending() {
+        UUID orderId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        Instant futureExpiresAt = Instant.now().plusSeconds(600);
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261017-TEST1")
+                .userId(userId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(futureExpiresAt)
+                .build();
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        OrderCountdownResponse countdown = orderService.getOrderCountdown(orderId, userId, false);
+
+        assertThat(countdown).isNotNull();
+        assertThat(countdown.getOrderId()).isEqualTo(orderId);
+        assertThat(countdown.getOrderCode()).isEqualTo("TKZ-20261017-TEST1");
+        assertThat(countdown.getStatus()).isEqualTo(OrderStatus.PENDING);
+        assertThat(countdown.getIsExpired()).isFalse();
+        assertThat(countdown.getRemainingSeconds()).isBetween(580L, 600L);
+        assertThat(countdown.getCurrentTime()).isNotNull();
+
+        verify(eventServiceClient, never()).releaseInventory(any(), any());
+    }
+
+    @Test
+    @DisplayName("Countdown: Tự động hết hạn và giải phóng tồn kho khi kiểm tra countdown sau khi expires_at đã qua")
+    void shouldExpireOrderAndReleaseInventoryWhenCountdownCheckedAfterExpiration() {
+        UUID orderId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        Instant pastExpiresAt = Instant.now().minusSeconds(30);
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261017-EXP01")
+                .userId(userId)
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(pastExpiresAt)
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(3)
+                .unitPrice(new BigDecimal("250000"))
+                .build();
+        order.addItem(item);
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        OrderCountdownResponse countdown = orderService.getOrderCountdown(orderId, userId, false);
+
+        assertThat(countdown).isNotNull();
+        assertThat(countdown.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        assertThat(countdown.getIsExpired()).isTrue();
+        assertThat(countdown.getRemainingSeconds()).isZero();
+
+        ArgumentCaptor<ReleaseInventoryRequest> releaseCaptor = ArgumentCaptor.forClass(ReleaseInventoryRequest.class);
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), releaseCaptor.capture());
+
+        ReleaseInventoryRequest capturedReq = releaseCaptor.getValue();
+        assertThat(capturedReq.getShowTimeId()).isEqualTo(showTimeId);
+        assertThat(capturedReq.getItems()).hasSize(1);
+        assertThat(capturedReq.getItems().get(0).getTicketTypeId()).isEqualTo(ticketTypeId);
+        assertThat(capturedReq.getItems().get(0).getQuantity()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("Xem chi tiết đơn hàng: Tự động chuyển EXPIRED và giải phóng tồn kho nếu đã quá thời hạn giữ chỗ")
+    void shouldExpireOrderAndReleaseInventoryWhenOrderQueriedByIdAfterExpiration() {
+        UUID orderId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        Instant pastExpiresAt = Instant.now().minusSeconds(10);
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261017-EXP02")
+                .userId(userId)
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(pastExpiresAt)
+                .build();
+
+        OrderItem item = OrderItem.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .unitPrice(new BigDecimal("100000"))
+                .build();
+        order.addItem(item);
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(orderMapper.toResponse(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0);
+            return OrderResponse.builder()
+                    .id(o.getId())
+                    .status(o.getStatus())
+                    .build();
+        });
+
+        OrderResponse response = orderService.getOrderById(orderId, userId, false);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Batch Sweeper: Quét và giải phóng tồn kho cho tất cả đơn hàng đã hết hạn giữ chỗ")
+    void shouldReleaseExpiredOrdersInBatch() {
+        UUID orderId1 = UUID.randomUUID();
+        UUID orderId2 = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        Instant pastExpiresAt = Instant.now().minusSeconds(60);
+
+        Order order1 = Order.builder()
+                .id(orderId1)
+                .orderCode("TKZ-BATCH-01")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(pastExpiresAt)
+                .build();
+        order1.addItem(OrderItem.builder().ticketTypeId(ticketTypeId).quantity(2).unitPrice(new BigDecimal("150000")).build());
+
+        Order order2 = Order.builder()
+                .id(orderId2)
+                .orderCode("TKZ-BATCH-02")
+                .userId(UUID.randomUUID())
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(pastExpiresAt)
+                .build();
+        order2.addItem(OrderItem.builder().ticketTypeId(ticketTypeId).quantity(1).unitPrice(new BigDecimal("150000")).build());
+
+        when(orderRepository.findByStatusAndExpiresAtBeforeWithItems(eq(OrderStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(order1, order2));
+        when(orderRepository.findByIdWithItems(orderId1)).thenReturn(Optional.of(order1));
+        when(orderRepository.findByIdWithItems(orderId2)).thenReturn(Optional.of(order2));
+
+        int releasedCount = orderService.releaseExpiredOrders();
+
+        assertThat(releasedCount).isEqualTo(2);
+        assertThat(order1.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        assertThat(order2.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        verify(eventServiceClient, times(2)).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hủy đơn hàng: Người dùng hủy đơn PENDING thành công và giải phóng tồn kho vé")
+    void shouldCancelPendingOrderAndReleaseInventory() {
+        UUID orderId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-CANCEL-01")
+                .userId(userId)
+                .showTimeId(showTimeId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().plusSeconds(500))
+                .build();
+        order.addItem(OrderItem.builder().ticketTypeId(ticketTypeId).quantity(2).unitPrice(new BigDecimal("200000")).build());
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(orderMapper.toResponse(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0);
+            return OrderResponse.builder()
+                    .id(o.getId())
+                    .status(o.getStatus())
+                    .build();
+        });
+
+        OrderResponse response = orderService.cancelOrder(orderId, userId, false);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Hủy đơn hàng: Quăng ngoại lệ nếu đơn hàng không ở trạng thái PENDING")
+    void shouldThrowBadRequestWhenCancellingNonPendingOrder() {
+        UUID orderId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-PAID-01")
+                .userId(userId)
+                .status(OrderStatus.PAID)
+                .expiresAt(Instant.now().plusSeconds(500))
+                .build();
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        assertThatThrownBy(() -> orderService.cancelOrder(orderId, userId, false))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Chỉ có thể hủy đơn hàng khi đang ở trạng thái chờ thanh toán");
+
+        verify(eventServiceClient, never()).releaseInventory(any(), any());
     }
 }
