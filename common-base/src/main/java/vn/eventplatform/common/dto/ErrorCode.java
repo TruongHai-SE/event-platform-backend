@@ -35,9 +35,10 @@ public enum ErrorCode {
     // 429 Too Many Requests
     TOO_MANY_REQUESTS("ERR_TOO_MANY_REQUESTS", "Quá nhiều yêu cầu, vui lòng thử lại sau", HttpStatus.TOO_MANY_REQUESTS),
 
-    // 500 Internal Server Error
+    // 500 Internal Server Error & 503 Service Unavailable
     INTERNAL_SERVER_ERROR("ERR_INTERNAL_SERVER", "Đã xảy ra lỗi hệ thống, vui lòng thử lại sau", HttpStatus.INTERNAL_SERVER_ERROR),
-    MAIL_SENDING_FAILED("ERR_MAIL_SENDING", "Không thể gửi email xác thực, vui lòng thử lại sau", HttpStatus.INTERNAL_SERVER_ERROR);
+    MAIL_SENDING_FAILED("ERR_MAIL_SENDING", "Không thể gửi email xác thực, vui lòng thử lại sau", HttpStatus.INTERNAL_SERVER_ERROR),
+    SERVICE_UNAVAILABLE("ERR_SERVICE_UNAVAILABLE", "Dịch vụ tạm thời gián đoạn, vui lòng thử lại sau", HttpStatus.SERVICE_UNAVAILABLE);
 
     private final String code;
     private final String message;

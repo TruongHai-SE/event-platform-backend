@@ -4,98 +4,130 @@ server:
 spring:
   application:
     name: api-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 1000ms
+      connect-timeout: 1000ms
   cloud:
     gateway:
+      httpclient:
+        connect-timeout: 3000
+        response-timeout: 5s
       discovery:
         locator:
-          enabled: true
+          enabled: false
           lower-case-service-id: true
       routes:
         - id: auth-service-route
-          uri: lb://auth-service
+          uri: ${AUTH_SERVICE_URI:lb://auth-service}
           predicates:
             - Path=/api/v1/auth/**
 
         - id: user-service-route
-          uri: lb://user-service
+          uri: ${USER_SERVICE_URI:lb://user-service}
           predicates:
-            - Path=/api/v1/users/**, /api/v1/roles/**, /api/v1/permissions/**
+            - Path=/api/v1/users/**, /api/v1/roles/**, /api/v1/permissions/**, /api/v1/admin/organizer-applications/**
+
+        - id: event-service-route
+          uri: ${EVENT_SERVICE_URI:lb://event-service}
+          predicates:
+            - Path=/api/v1/events/**, /api/v1/categories/**, /api/v1/venues/**, /api/v1/speaker-invitations/**, /uploads/**
+
+        - id: ticket-service-route
+          uri: ${TICKET_SERVICE_URI:lb://ticket-service}
+          predicates:
+            - Path=/api/v1/tickets/**, /api/v1/check-ins/**, /api/v1/seat-maps/**
+
+        - id: order-service-route
+          uri: ${ORDER_SERVICE_URI:lb://order-service}
+          predicates:
+            - Path=/api/v1/orders/**
+
+        - id: payment-service-route
+          uri: ${PAYMENT_SERVICE_URI:lb://payment-service}
+          predicates:
+            - Path=/api/v1/payments/**
 
         - id: promotion-service-route
-          uri: lb://promotion-service
+          uri: ${PROMOTION_SERVICE_URI:lb://promotion-service}
           predicates:
-            - Path=/api/v1/admin/vouchers/**, /api/v1/organizer/vouchers/**, /api/v1/vouchers/**, /internal/v1/vouchers/**
+            - Path=/api/v1/promotions/**, /api/v1/admin/vouchers/**, /api/v1/organizer/vouchers/**, /api/v1/vouchers/**
 
         - id: ad-service-route
-          uri: lb://ad-service
+          uri: ${AD_SERVICE_URI:lb://ad-service}
           predicates:
-            - Path=/api/v1/public/banners/**, /api/v1/public/ad-position-prices/**, /api/v1/admin/ad-packages/**, /api/v1/admin/ad-position-prices/**, /api/v1/admin/ad-campaigns/**, /api/v1/admin/banners/**, /api/v1/organizer/ad-campaigns/**, /internal/v1/ad-campaigns/**
+            - Path=/api/v1/ads/**, /api/v1/ad-campaigns/**, /api/v1/public/banners/**, /api/v1/public/ad-position-prices/**, /api/v1/admin/ad-packages/**, /api/v1/admin/ad-position-prices/**, /api/v1/admin/ad-campaigns/**, /api/v1/admin/banners/**, /api/v1/organizer/ad-campaigns/**
+
+        - id: notification-service-route
+          uri: ${NOTIFICATION_SERVICE_URI:lb://notification-service}
+          predicates:
+            - Path=/api/v1/notifications/**
+
+        - id: analytics-service-route
+          uri: ${ANALYTICS_SERVICE_URI:lb://analytics-service}
+          predicates:
+            - Path=/api/v1/analytics/**
 
         - id: auth-service-docs
-          uri: lb://auth-service
+          uri: ${AUTH_SERVICE_URI:lb://auth-service}
           predicates:
             - Path=/v3/api-docs/auth-service
           filters:
             - SetPath=/v3/api-docs
 
         - id: user-service-docs
-          uri: lb://user-service
+          uri: ${USER_SERVICE_URI:lb://user-service}
           predicates:
             - Path=/v3/api-docs/user-service
           filters:
             - SetPath=/v3/api-docs
 
+        - id: event-service-docs
+          uri: ${EVENT_SERVICE_URI:lb://event-service}
+          predicates:
+            - Path=/v3/api-docs/event-service
+          filters:
+            - SetPath=/v3/api-docs
+
         - id: promotion-service-docs
-          uri: lb://promotion-service
+          uri: ${PROMOTION_SERVICE_URI:lb://promotion-service}
           predicates:
             - Path=/v3/api-docs/promotion-service
           filters:
             - SetPath=/v3/api-docs
 
         - id: ad-service-docs
-          uri: lb://ad-service
+          uri: ${AD_SERVICE_URI:lb://ad-service}
           predicates:
             - Path=/v3/api-docs/ad-service
           filters:
             - SetPath=/v3/api-docs
 
-        - id: ticket-service-route
-          uri: lb://ticket-service
-          predicates:
-            - Path=/api/v1/tickets/**, /api/v1/check-ins/**
-
         - id: ticket-service-docs
-          uri: lb://ticket-service
+          uri: ${TICKET_SERVICE_URI:lb://ticket-service}
           predicates:
             - Path=/v3/api-docs/ticket-service
           filters:
             - SetPath=/v3/api-docs
 
-        - id: order-service-route
-          uri: lb://order-service
-          predicates:
-            - Path=/api/v1/orders/**
-
         - id: order-service-docs
-          uri: lb://order-service
+          uri: ${ORDER_SERVICE_URI:lb://order-service}
           predicates:
             - Path=/v3/api-docs/order-service
           filters:
             - SetPath=/v3/api-docs
 
-        - id: payment-service-route
-          uri: lb://payment-service
-          predicates:
-            - Path=/api/v1/payments/**
-
         - id: payment-service-docs
-          uri: lb://payment-service
+          uri: ${PAYMENT_SERVICE_URI:lb://payment-service}
           predicates:
             - Path=/v3/api-docs/payment-service
           filters:
             - SetPath=/v3/api-docs
 
       globalcors:
+        add-to-simple-url-handler-mapping: true
         cors-configurations:
           '[/**]':
             allowedOrigins:
@@ -109,7 +141,36 @@ spring:
               - DELETE
               - OPTIONS
             allowedHeaders: "*"
+            exposedHeaders:
+              - "X-Request-Id"
+              - "Retry-After"
+              - "X-RateLimit-Limit"
+              - "X-RateLimit-Remaining"
             allowCredentials: true
+            maxAge: 3600
+
+security:
+  token:
+    secret-key: ${TOKEN_SECRET_KEY:default_dev_secret_key_for_event_platform_must_be_at_least_32_bytes}
+
+gateway:
+  rate-limit:
+    enabled: ${GATEWAY_RATE_LIMIT_ENABLED:true}
+    auth-requests-per-minute: ${GATEWAY_AUTH_RATE_LIMIT:20}
+    user-requests-per-minute: ${GATEWAY_USER_RATE_LIMIT:120}
+    anon-requests-per-minute: ${GATEWAY_ANON_RATE_LIMIT:60}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  health:
+    redis:
+      enabled: false
 
 eureka:
   client:
@@ -127,13 +188,15 @@ springdoc:
         url: /v3/api-docs/auth-service
       - name: 2. User Service (Hồ sơ & Phân quyền)
         url: /v3/api-docs/user-service
-      - name: 3. Promotion Service (Voucher)
+      - name: 3. Event Service (Sự kiện & Địa điểm)
+        url: /v3/api-docs/event-service
+      - name: 4. Promotion Service (Voucher)
         url: /v3/api-docs/promotion-service
-      - name: 4. Ad Service (Quảng cáo)
+      - name: 5. Ad Service (Quảng cáo)
         url: /v3/api-docs/ad-service
-      - name: 5. Ticket Service (Vé & Check-in)
+      - name: 6. Ticket Service (Vé & Check-in)
         url: /v3/api-docs/ticket-service
-      - name: 6. Order Service (Đơn hàng & Giữ chỗ)
+      - name: 7. Order Service (Đơn hàng & Giữ chỗ)
         url: /v3/api-docs/order-service
-      - name: 7. Payment Service (Thanh toán & Cổng thanh toán)
+      - name: 8. Payment Service (Thanh toán & Cổng thanh toán)
         url: /v3/api-docs/payment-service
