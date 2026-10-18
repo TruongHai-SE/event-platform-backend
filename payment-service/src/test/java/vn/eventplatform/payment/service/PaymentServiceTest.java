@@ -212,4 +212,118 @@ class PaymentServiceTest {
         assertThat(existingPayment.getTransactionId()).isEqualTo("VNP123456");
         verify(paymentRepository).save(existingPayment);
     }
+
+    @Test
+    @DisplayName("retryPayment cancels previous PENDING payments and initializes new gateway payment")
+    void retryPayment_CancelsPreviousPendingPayments_AndInitializesNewGateway() {
+        Payment oldVnpayPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.existsByOrderIdAndStatusIn(eq(orderId), eq(List.of(PaymentStatus.SUCCESS))))
+                .thenReturn(false);
+        when(paymentRepository.findByOrderIdAndStatus(eq(orderId), eq(PaymentStatus.PENDING)))
+                .thenReturn(List.of(oldVnpayPayment));
+
+        Payment newSepayPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.save(any(Payment.class))).thenReturn(newSepayPayment);
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.SEPAY)).thenReturn(paymentStrategy);
+
+        PaymentInitResult initResult = PaymentInitResult.builder()
+                .paymentId(newSepayPayment.getId())
+                .orderId(orderId)
+                .method(PaymentGateway.SEPAY)
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .build();
+
+        when(paymentStrategy.createPaymentUrl(any(PaymentContext.class))).thenReturn(initResult);
+
+        PaymentInitResponse mappedResponse = PaymentInitResponse.builder()
+                .paymentId(newSepayPayment.getId())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentMapper.toInitResponse(newSepayPayment, initResult)).thenReturn(mappedResponse);
+
+        Instant originalExpiresAt = internalOrder.getExpiresAt();
+        vn.eventplatform.payment.dto.InternalRetryPaymentRequest retryRequest =
+                vn.eventplatform.payment.dto.InternalRetryPaymentRequest.builder()
+                        .orderId(orderId)
+                        .orderCode("TKZ-20261018-001")
+                        .amount(new BigDecimal("100000.00"))
+                        .method(PaymentGateway.SEPAY)
+                        .expiresAt(originalExpiresAt)
+                        .customerName("Nguyen Van A")
+                        .customerEmail("test@example.com")
+                        .clientIp("127.0.0.1")
+                        .build();
+
+        PaymentInitResponse response = paymentService.retryPayment(retryRequest);
+
+        assertThat(oldVnpayPayment.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
+        verify(paymentRepository).saveAll(List.of(oldVnpayPayment));
+        assertThat(response).isNotNull();
+        assertThat(response.getMethod()).isEqualTo(PaymentGateway.SEPAY);
+        assertThat(response.getExpiresAt()).isEqualTo(originalExpiresAt);
+    }
+
+    @Test
+    @DisplayName("retryPayment throws BAD_REQUEST when order already has SUCCESS payment")
+    void retryPayment_ThrowsBadRequest_WhenOrderAlreadyPaid() {
+        when(paymentRepository.existsByOrderIdAndStatusIn(eq(orderId), eq(List.of(PaymentStatus.SUCCESS))))
+                .thenReturn(true);
+
+        vn.eventplatform.payment.dto.InternalRetryPaymentRequest retryRequest =
+                vn.eventplatform.payment.dto.InternalRetryPaymentRequest.builder()
+                        .orderId(orderId)
+                        .orderCode("TKZ-20261018-001")
+                        .amount(new BigDecimal("100000.00"))
+                        .method(PaymentGateway.SEPAY)
+                        .expiresAt(Instant.now().plusSeconds(600))
+                        .build();
+
+        assertThatThrownBy(() -> paymentService.retryPayment(retryRequest))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng này đã có giao dịch thanh toán thành công");
+    }
+
+    @Test
+    @DisplayName("retryPayment throws BAD_REQUEST when order expiresAt is in the past")
+    void retryPayment_ThrowsBadRequest_WhenOrderExpired() {
+        when(paymentRepository.existsByOrderIdAndStatusIn(eq(orderId), eq(List.of(PaymentStatus.SUCCESS))))
+                .thenReturn(false);
+
+        vn.eventplatform.payment.dto.InternalRetryPaymentRequest retryRequest =
+                vn.eventplatform.payment.dto.InternalRetryPaymentRequest.builder()
+                        .orderId(orderId)
+                        .orderCode("TKZ-20261018-001")
+                        .amount(new BigDecimal("100000.00"))
+                        .method(PaymentGateway.SEPAY)
+                        .expiresAt(Instant.now().minusSeconds(60))
+                        .build();
+
+        assertThatThrownBy(() -> paymentService.retryPayment(retryRequest))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng đã hết thời gian giữ chỗ thanh toán");
+    }
 }

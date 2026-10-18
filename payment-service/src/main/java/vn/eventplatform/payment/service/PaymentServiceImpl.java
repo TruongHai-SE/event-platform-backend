@@ -29,6 +29,7 @@ import vn.eventplatform.payment.dto.sepay.SepayWebhookResponse;
 import vn.eventplatform.payment.payment.sepay.config.SePayProperties;
 import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Instant;
 import java.util.List;
@@ -71,33 +72,93 @@ public class PaymentServiceImpl implements PaymentService {
             throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng không ở trạng thái chờ thanh toán (PENDING)");
         }
 
+        return initPaymentForOrder(
+                order.getId(),
+                order.getOrderCode(),
+                order.getTotalAmount(),
+                request.getMethod(),
+                order.getExpiresAt(),
+                order.getCustomerName(),
+                order.getCustomerEmail(),
+                clientIp
+        );
+    }
+
+    @Override
+    @Transactional
+    public PaymentInitResponse retryPayment(InternalRetryPaymentRequest request) {
+        log.info("Thử lại thanh toán (đổi cổng) cho orderId: {}, orderCode: {}, method: {}",
+                request.getOrderId(), request.getOrderCode(), request.getMethod());
+
+        return initPaymentForOrder(
+                request.getOrderId(),
+                request.getOrderCode(),
+                request.getAmount(),
+                request.getMethod(),
+                request.getExpiresAt(),
+                request.getCustomerName(),
+                request.getCustomerEmail(),
+                request.getClientIp()
+        );
+    }
+
+    private PaymentInitResponse initPaymentForOrder(
+            UUID orderId,
+            String orderCode,
+            BigDecimal amount,
+            PaymentGateway method,
+            Instant expiresAt,
+            String customerName,
+            String customerEmail,
+            String clientIp
+    ) {
+        if (paymentRepository.existsByOrderIdAndStatusIn(orderId, List.of(PaymentStatus.SUCCESS))) {
+            log.warn("Đơn hàng orderId={} đã có giao dịch thanh toán SUCCESS, từ chối tạo mới", orderId);
+            throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng này đã có giao dịch thanh toán thành công");
+        }
+
+        if (expiresAt != null && expiresAt.isBefore(Instant.now())) {
+            log.warn("Đơn hàng orderId={} đã hết hạn giữ chỗ thanh toán (expiresAt={})", orderId, expiresAt);
+            throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng đã hết thời gian giữ chỗ thanh toán");
+        }
+
+        List<Payment> pendingPayments = paymentRepository.findByOrderIdAndStatus(orderId, PaymentStatus.PENDING);
+        if (pendingPayments != null && !pendingPayments.isEmpty()) {
+            for (Payment oldPayment : pendingPayments) {
+                oldPayment.setStatus(PaymentStatus.CANCELLED);
+            }
+            paymentRepository.saveAll(pendingPayments);
+            log.info("Đã hủy {} giao dịch thanh toán PENDING cũ của orderId={} trước khi khởi tạo cổng {}",
+                    pendingPayments.size(), orderId, method);
+        }
+
         Payment payment = Payment.builder()
-                .orderId(order.getId())
-                .orderCode(order.getOrderCode())
-                .method(request.getMethod())
-                .amount(order.getTotalAmount())
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .method(method)
+                .amount(amount)
                 .status(PaymentStatus.PENDING)
                 .build();
         Payment savedPayment = paymentRepository.save(payment);
 
         PaymentContext context = PaymentContext.builder()
                 .paymentId(savedPayment.getId())
-                .orderId(order.getId())
-                .orderCode(order.getOrderCode())
-                .amount(order.getTotalAmount())
-                .method(request.getMethod())
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .amount(amount)
+                .method(method)
                 .clientIp(clientIp)
                 .returnUrl(vnPayProperties.getReturnUrl())
-                .orderInfo("Thanh toan don hang " + order.getOrderCode())
-                .expiresAt(order.getExpiresAt())
-                .customerEmail(order.getCustomerEmail())
-                .customerName(order.getCustomerName())
+                .orderInfo("Thanh toan don hang " + orderCode)
+                .expiresAt(expiresAt)
+                .customerEmail(customerEmail)
+                .customerName(customerName)
                 .build();
 
-        PaymentInitResult initResult = paymentStrategyFactory.getStrategy(request.getMethod()).createPaymentUrl(context);
+        PaymentInitResult initResult = paymentStrategyFactory.getStrategy(method).createPaymentUrl(context);
 
         PaymentInitResponse response = paymentMapper.toInitResponse(savedPayment, initResult);
-        response.setExpiresAt(order.getExpiresAt());
+        response.setExpiresAt(expiresAt);
         return response;
     }
 
@@ -115,11 +176,21 @@ public class PaymentServiceImpl implements PaymentService {
         }
 
         List<Payment> pendingPayments = paymentRepository.findByOrderCodeAndStatus(orderCode, PaymentStatus.PENDING);
-        Payment paymentToUpdate;
-        if (!pendingPayments.isEmpty()) {
-            paymentToUpdate = pendingPayments.get(0);
-        } else {
-            paymentToUpdate = paymentRepository.findByOrderCode(orderCode).orElse(null);
+        Payment paymentToUpdate = pendingPayments.stream()
+                .filter(p -> p.getMethod() == null || p.getMethod() == PaymentGateway.VNPAY)
+                .findFirst()
+                .orElse(null);
+
+        if (paymentToUpdate == null) {
+            List<Payment> allOrderPayments = paymentRepository.findByOrderCodeOrderByCreatedAtDesc(orderCode);
+            if (allOrderPayments != null && !allOrderPayments.isEmpty()) {
+                paymentToUpdate = allOrderPayments.stream()
+                        .filter(p -> p.getMethod() == null || p.getMethod() == PaymentGateway.VNPAY)
+                        .findFirst()
+                        .orElse(allOrderPayments.get(0));
+            } else {
+                paymentToUpdate = paymentRepository.findByOrderCode(orderCode).orElse(null);
+            }
         }
 
         if (paymentToUpdate == null) {
@@ -152,10 +223,12 @@ public class PaymentServiceImpl implements PaymentService {
             paymentToUpdate.setPaidAt(result.getPayDate() != null ? result.getPayDate() : Instant.now());
             paymentRepository.save(paymentToUpdate);
 
+            cancelOtherPendingPayments(paymentToUpdate.getOrderId(), paymentToUpdate.getId());
+
             OrderMarkPaidRequest markPaidRequest = OrderMarkPaidRequest.builder()
                     .paymentId(paymentToUpdate.getId())
                     .transactionId(result.getTransactionId())
-                    .paymentMethod(paymentToUpdate.getMethod().name())
+                    .paymentMethod(paymentToUpdate.getMethod() != null ? paymentToUpdate.getMethod().name() : PaymentGateway.VNPAY.name())
                     .paidAt(paymentToUpdate.getPaidAt())
                     .build();
 
@@ -171,7 +244,8 @@ public class PaymentServiceImpl implements PaymentService {
                 log.error("Lỗi Feign khi gọi order-service markOrderPaid cho orderId={}", paymentToUpdate.getOrderId(), e);
             }
         } else {
-            if (paymentToUpdate.getStatus() == PaymentStatus.PENDING) {
+            if (paymentToUpdate.getStatus() == PaymentStatus.PENDING
+                    && (paymentToUpdate.getMethod() == null || paymentToUpdate.getMethod() == PaymentGateway.VNPAY)) {
                 paymentToUpdate.setStatus(PaymentStatus.FAILED);
                 paymentToUpdate.setTransactionId(result.getTransactionId());
                 paymentRepository.save(paymentToUpdate);
@@ -209,12 +283,17 @@ public class PaymentServiceImpl implements PaymentService {
 
         // 3. Tìm giao dịch Payment tương ứng (bằng cách chuẩn hóa bỏ dấu '-')
         List<Payment> pendingPayments = paymentRepository.findByNormalizedOrderCodeAndStatus(rawCode, PaymentStatus.PENDING);
-        Payment paymentToUpdate;
-        if (!pendingPayments.isEmpty()) {
-            paymentToUpdate = pendingPayments.get(0);
-        } else {
+        Payment paymentToUpdate = pendingPayments.stream()
+                .filter(p -> p.getMethod() == null || p.getMethod() == PaymentGateway.SEPAY)
+                .findFirst()
+                .orElseGet(() -> pendingPayments.isEmpty() ? null : pendingPayments.get(0));
+
+        if (paymentToUpdate == null) {
             List<Payment> payments = paymentRepository.findByNormalizedOrderCode(rawCode);
-            paymentToUpdate = payments.isEmpty() ? null : payments.get(0);
+            paymentToUpdate = payments.stream()
+                    .filter(p -> p.getMethod() == null || p.getMethod() == PaymentGateway.SEPAY)
+                    .findFirst()
+                    .orElseGet(() -> payments.isEmpty() ? null : payments.get(0));
         }
 
         if (paymentToUpdate == null) {
@@ -254,6 +333,8 @@ public class PaymentServiceImpl implements PaymentService {
         paymentToUpdate.setPaidAt(Instant.now());
         paymentRepository.save(paymentToUpdate);
 
+        cancelOtherPendingPayments(paymentToUpdate.getOrderId(), paymentToUpdate.getId());
+
         // 7. Gọi order-service để chuyển trạng thái Order sang PAID
         OrderMarkPaidRequest markPaidRequest = OrderMarkPaidRequest.builder()
                 .paymentId(paymentToUpdate.getId())
@@ -278,6 +359,23 @@ public class PaymentServiceImpl implements PaymentService {
                 .success(true)
                 .message("Xử lý thanh toán thành công")
                 .build();
+    }
+
+    private void cancelOtherPendingPayments(UUID orderId, UUID currentSuccessPaymentId) {
+        if (orderId == null) {
+            return;
+        }
+        List<Payment> remainingPending = paymentRepository.findByOrderIdAndStatus(orderId, PaymentStatus.PENDING);
+        if (remainingPending == null || remainingPending.isEmpty()) {
+            return;
+        }
+        List<Payment> toCancel = remainingPending.stream()
+                .filter(p -> !p.getId().equals(currentSuccessPaymentId))
+                .toList();
+        if (!toCancel.isEmpty()) {
+            toCancel.forEach(p -> p.setStatus(PaymentStatus.CANCELLED));
+            paymentRepository.saveAll(toCancel);
+        }
     }
 
     private String extractCodeFromContent(String content) {
