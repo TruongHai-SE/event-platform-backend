@@ -83,6 +83,18 @@ spring:
           filters:
             - SetPath=/v3/api-docs
 
+        - id: payment-service-route
+          uri: lb://payment-service
+          predicates:
+            - Path=/api/v1/payments/**
+
+        - id: payment-service-docs
+          uri: lb://payment-service
+          predicates:
+            - Path=/v3/api-docs/payment-service
+          filters:
+            - SetPath=/v3/api-docs
+
       globalcors:
         cors-configurations:
           '[/**]':
@@ -123,3 +135,5 @@ springdoc:
         url: /v3/api-docs/ticket-service
       - name: 6. Order Service (Đơn hàng & Giữ chỗ)
         url: /v3/api-docs/order-service
+      - name: 7. Payment Service (Thanh toán & Cổng thanh toán)
+        url: /v3/api-docs/payment-service

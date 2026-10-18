@@ -35,4 +35,10 @@ public interface OrderService {
     int releaseExpiredOrders();
 
     void expireOrder(Order order);
+
+    OrderResponse getInternalOrderById(UUID id);
+
+    OrderResponse getInternalOrderByCode(String orderCode);
+
+    OrderResponse markOrderPaid(UUID id, vn.eventplatform.order.dto.OrderMarkPaidRequest request);
 }
