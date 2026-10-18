@@ -1,0 +1,75 @@
+eureka:
+  client:
+    enabled: false
+    register-with-eureka: false
+    fetch-registry: false
+
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+  cloud:
+    discovery:
+      enabled: false
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+      routes:
+        - id: test-auth-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/auth/**
+
+        - id: test-user-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/users/**, /api/v1/roles/**, /api/v1/permissions/**, /api/v1/admin/organizer-applications/**
+
+        - id: test-event-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/events/**, /api/v1/categories/**, /api/v1/venues/**, /api/v1/speaker-invitations/**, /uploads/**
+
+        - id: test-ticket-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/tickets/**, /api/v1/check-ins/**, /api/v1/seat-maps/**
+
+        - id: test-order-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/orders/**
+
+        - id: test-payment-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/payments/**
+
+        - id: test-promotion-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/promotions/**, /api/v1/admin/vouchers/**, /api/v1/organizer/vouchers/**, /api/v1/vouchers/**
+
+        - id: test-ad-route
+          uri: forward:/__downstream/echo
+          predicates:
+            - Path=/api/v1/ads/**, /api/v1/ad-campaigns/**, /api/v1/public/banners/**, /api/v1/public/ad-position-prices/**, /api/v1/admin/ad-packages/**, /api/v1/admin/ad-position-prices/**, /api/v1/admin/ad-campaigns/**, /api/v1/admin/banners/**, /api/v1/organizer/ad-campaigns/**
+
+        - id: test-crashed-service-route
+          uri: forward:/__downstream/crashed
+          predicates:
+            - Path=/api/v1/analytics/**
+
+security:
+  token:
+    secret-key: test_gateway_jwt_secret_key_must_be_at_least_256_bits_long_123456
+
+gateway:
+  rate-limit:
+    enabled: true
+    auth-requests-per-minute: 5
+    user-requests-per-minute: 20
+    anon-requests-per-minute: 10
