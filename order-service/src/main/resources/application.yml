@@ -43,9 +43,9 @@ order:
 
 security:
   token:
-    secret-key: ${TOKEN_SECRET_KEY}
+    secret-key: ${TOKEN_SECRET_KEY:default_dev_secret_key_for_event_platform_must_be_at_least_32_bytes}
   internal:
-    secret: ${INTERNAL_API_SECRET}
+    secret: ${INTERNAL_API_SECRET:default_internal_api_secret_token}
 
 eureka:
   client:

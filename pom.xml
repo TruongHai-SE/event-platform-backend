@@ -42,6 +42,7 @@
         <module>event-service</module>
         <module>ticket-service</module>
         <module>order-service</module>
+        <module>payment-service</module>
     </modules>
 
     <dependencyManagement>

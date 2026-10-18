@@ -571,4 +571,43 @@ public class OrderServiceImpl implements OrderService {
         }
         return "TKZ-" + datePart + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
     }
+
+    @Override
+    @Transactional(readOnly = true)
+    public OrderResponse getInternalOrderById(UUID id) {
+        Order order = orderRepository.findById(id)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy đơn hàng với id: " + id));
+        return orderMapper.toResponse(order);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public OrderResponse getInternalOrderByCode(String orderCode) {
+        Order order = orderRepository.findByOrderCode(orderCode)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy đơn hàng với mã: " + orderCode));
+        return orderMapper.toResponse(order);
+    }
+
+    @Override
+    @Transactional
+    public OrderResponse markOrderPaid(UUID id, vn.eventplatform.order.dto.OrderMarkPaidRequest request) {
+        Order order = orderRepository.findById(id)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy đơn hàng với id: " + id));
+
+        if (order.getStatus() == OrderStatus.PAID) {
+            log.info("Đơn hàng {} đã ở trạng thái PAID (idempotent call)", order.getOrderCode());
+            return orderMapper.toResponse(order);
+        }
+
+        if (order.getStatus() != OrderStatus.PENDING) {
+            log.warn("Không thể chuyển sang PAID vì đơn hàng {} đang ở trạng thái {}", order.getOrderCode(), order.getStatus());
+            throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng không ở trạng thái PENDING");
+        }
+
+        order.setStatus(OrderStatus.PAID);
+        Order savedOrder = orderRepository.save(order);
+        log.info("Đơn hàng {} đã được cập nhật sang trạng thái PAID thành công", savedOrder.getOrderCode());
+
+        return orderMapper.toResponse(savedOrder);
+    }
 }
