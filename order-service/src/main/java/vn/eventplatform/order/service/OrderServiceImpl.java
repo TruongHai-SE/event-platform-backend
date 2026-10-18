@@ -164,124 +164,151 @@ public class OrderServiceImpl implements OrderService {
             throw new AppException(ErrorCode.BAD_REQUEST, "Không thể giữ chỗ vé cho đơn hàng này");
         }
 
-        Map<UUID, TicketTypeInventoryDto> inventoryMap = reserveResponse.getData().getReservedItems().stream()
-                .collect(Collectors.toMap(TicketTypeInventoryDto::getTicketTypeId, Function.identity(), (a, b) -> a));
+        boolean voucherApplied = false;
+        Order savedOrder = null;
 
-        // 2. Tính snapshot subtotal từ đơn giá chính thức của từng hạng vé (không phụ thuộc giá client)
-        BigDecimal subtotal = BigDecimal.ZERO;
-        List<OrderItem> orderItems = new ArrayList<>();
+        try {
+            Map<UUID, TicketTypeInventoryDto> inventoryMap = reserveResponse.getData().getReservedItems().stream()
+                    .collect(Collectors.toMap(TicketTypeInventoryDto::getTicketTypeId, Function.identity(), (a, b) -> a));
 
-        for (CreateOrderItemRequest itemReq : request.getItems()) {
-            TicketTypeInventoryDto inventoryItem = inventoryMap.get(itemReq.getTicketTypeId());
-            if (inventoryItem == null) {
-                throw new AppException(ErrorCode.BAD_REQUEST,
-                        "Không tìm thấy thông tin hạng vé: " + itemReq.getTicketTypeId());
+            // 2. Tính snapshot subtotal từ đơn giá chính thức của từng hạng vé (không phụ thuộc giá client)
+            BigDecimal subtotal = BigDecimal.ZERO;
+            List<OrderItem> orderItems = new ArrayList<>();
+
+            for (CreateOrderItemRequest itemReq : request.getItems()) {
+                TicketTypeInventoryDto inventoryItem = inventoryMap.get(itemReq.getTicketTypeId());
+                if (inventoryItem == null) {
+                    throw new AppException(ErrorCode.BAD_REQUEST,
+                            "Không tìm thấy thông tin hạng vé: " + itemReq.getTicketTypeId());
+                }
+
+                // Snapshot đơn giá chính thức từ hệ thống sự kiện
+                BigDecimal snapshotUnitPrice = inventoryItem.getPrice();
+                BigDecimal itemTotal = snapshotUnitPrice.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
+                subtotal = subtotal.add(itemTotal);
+
+                OrderItem orderItem = OrderItem.builder()
+                        .ticketTypeId(itemReq.getTicketTypeId())
+                        .quantity(itemReq.getQuantity())
+                        .unitPrice(snapshotUnitPrice)
+                        .build();
+                orderItems.add(orderItem);
             }
 
-            // Snapshot đơn giá chính thức từ hệ thống sự kiện
-            BigDecimal snapshotUnitPrice = inventoryItem.getPrice();
-            BigDecimal itemTotal = snapshotUnitPrice.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
-            subtotal = subtotal.add(itemTotal);
+            // 3. Gọi promotion-service validate và tính giảm giá, snapshot discount_amount chính thức
+            BigDecimal discount = BigDecimal.ZERO;
+            UUID appliedPromotionId = null;
 
-            OrderItem orderItem = OrderItem.builder()
-                    .ticketTypeId(itemReq.getTicketTypeId())
-                    .quantity(itemReq.getQuantity())
-                    .unitPrice(snapshotUnitPrice)
-                    .build();
-            orderItems.add(orderItem);
-        }
+            String promoCode = request.getPromotionCode() != null && !request.getPromotionCode().isBlank()
+                    ? request.getPromotionCode().trim()
+                    : null;
 
-        // 3. Gọi promotion-service validate và tính giảm giá, snapshot discount_amount chính thức
-        BigDecimal discount = BigDecimal.ZERO;
-        UUID appliedPromotionId = null;
-
-        String promoCode = request.getPromotionCode() != null && !request.getPromotionCode().isBlank()
-                ? request.getPromotionCode().trim()
-                : null;
-
-        if (promoCode != null) {
-            VoucherValidationRequest voucherRequest = VoucherValidationRequest.builder()
-                    .userId(userId)
-                    .eventId(request.getEventId())
-                    .code(promoCode)
-                    .orderAmount(subtotal)
-                    .build();
-
-            ApiResponse<VoucherCalculationResponse> voucherResponse =
-                    promotionServiceClient.validateVoucher(internalSecret, voucherRequest);
-
-            if (voucherResponse == null || !voucherResponse.isSuccess() || voucherResponse.getData() == null) {
-                throw new AppException(ErrorCode.BAD_REQUEST, "Mã giảm giá không hợp lệ hoặc không đủ điều kiện áp dụng");
-            }
-
-            VoucherCalculationResponse calculation = voucherResponse.getData();
-            appliedPromotionId = calculation.getPromotionId();
-            discount = calculation.getDiscountAmount() != null ? calculation.getDiscountAmount() : BigDecimal.ZERO;
-        } else if (request.getDiscountAmount() != null) {
-            appliedPromotionId = request.getPromotionId();
-            discount = request.getDiscountAmount().max(BigDecimal.ZERO);
-        }
-
-        if (discount.compareTo(subtotal) > 0) {
-            discount = subtotal;
-        }
-
-        BigDecimal totalAmount = subtotal.subtract(discount);
-
-        // 4. Sinh mã order_code chuẩn TKZ-YYYYMMDD-XXXXX
-        String orderCode = generateUniqueOrderCode();
-
-        // 5. Thiết lập thời gian giữ chỗ 15 phút (mặc định hoặc cấu hình)
-        Instant expiresAt = Instant.now().plus(holdMinutes, ChronoUnit.MINUTES);
-
-        // 6. Khởi tạo Entity Order kèm snapshot số tiền và mã giảm giá
-        Order order = Order.builder()
-                .orderCode(orderCode)
-                .userId(userId)
-                .eventId(request.getEventId())
-                .showTimeId(request.getShowTimeId())
-                .promotionId(appliedPromotionId)
-                .subtotal(subtotal)
-                .discountAmount(discount)
-                .totalAmount(totalAmount)
-                .status(OrderStatus.PENDING)
-                .customerName(request.getCustomerName())
-                .customerEmail(request.getCustomerEmail())
-                .customerPhone(request.getCustomerPhone())
-                .expiresAt(expiresAt)
-                .build();
-
-        // 7. Gán danh sách OrderItem đã snapshot đơn giá
-        for (OrderItem item : orderItems) {
-            order.addItem(item);
-        }
-
-        order = orderRepository.save(order);
-        log.info("Tạo đơn hàng thành công: orderCode={}, userId={}, eventId={}, subtotal={}, totalAmount={}, expiresAt={}",
-                order.getOrderCode(), userId, order.getEventId(), order.getSubtotal(), order.getTotalAmount(), order.getExpiresAt());
-
-        // 8. Nếu có áp dụng mã giảm giá, gọi promotion-service apply để ghi nhận lượt dùng và chốt slot voucher
-        if (promoCode != null) {
-            try {
-                VoucherApplyRequest applyRequest = VoucherApplyRequest.builder()
-                        .orderId(order.getId())
+            if (promoCode != null) {
+                VoucherValidationRequest voucherRequest = VoucherValidationRequest.builder()
                         .userId(userId)
                         .eventId(request.getEventId())
                         .code(promoCode)
                         .orderAmount(subtotal)
                         .build();
-                ApiResponse<VoucherCalculationResponse> applyResponse =
-                        promotionServiceClient.applyVoucher(internalSecret, applyRequest);
-                if (applyResponse != null && !applyResponse.isSuccess()) {
-                    log.warn("promotion-service trả về lỗi khi áp dụng voucher cho orderCode={}: {}",
-                            order.getOrderCode(), applyResponse.getMessage());
-                }
-            } catch (Exception e) {
-                log.error("Lỗi Feign khi gọi promotion-service applyVoucher cho orderCode={}", order.getOrderCode(), e);
-            }
-        }
 
-        return orderMapper.toResponse(order);
+                ApiResponse<VoucherCalculationResponse> voucherResponse =
+                        promotionServiceClient.validateVoucher(internalSecret, voucherRequest);
+
+                if (voucherResponse == null || !voucherResponse.isSuccess() || voucherResponse.getData() == null) {
+                    throw new AppException(ErrorCode.BAD_REQUEST, "Mã giảm giá không hợp lệ hoặc không đủ điều kiện áp dụng");
+                }
+
+                VoucherCalculationResponse calculation = voucherResponse.getData();
+                appliedPromotionId = calculation.getPromotionId();
+                discount = calculation.getDiscountAmount() != null ? calculation.getDiscountAmount() : BigDecimal.ZERO;
+            } else if (request.getDiscountAmount() != null) {
+                appliedPromotionId = request.getPromotionId();
+                discount = request.getDiscountAmount().max(BigDecimal.ZERO);
+            }
+
+            if (discount.compareTo(subtotal) > 0) {
+                discount = subtotal;
+            }
+
+            BigDecimal totalAmount = subtotal.subtract(discount);
+
+            // 4. Sinh mã order_code chuẩn TKZ-YYYYMMDD-XXXXX
+            String orderCode = generateUniqueOrderCode();
+
+            // 5. Thiết lập thời gian giữ chỗ 15 phút (mặc định hoặc cấu hình)
+            Instant expiresAt = Instant.now().plus(holdMinutes, ChronoUnit.MINUTES);
+
+            // 6. Khởi tạo Entity Order kèm snapshot số tiền và mã giảm giá
+            Order order = Order.builder()
+                    .orderCode(orderCode)
+                    .userId(userId)
+                    .eventId(request.getEventId())
+                    .showTimeId(request.getShowTimeId())
+                    .promotionId(appliedPromotionId)
+                    .subtotal(subtotal)
+                    .discountAmount(discount)
+                    .totalAmount(totalAmount)
+                    .status(OrderStatus.PENDING)
+                    .customerName(request.getCustomerName())
+                    .customerEmail(request.getCustomerEmail())
+                    .customerPhone(request.getCustomerPhone())
+                    .expiresAt(expiresAt)
+                    .build();
+
+            // 7. Gán danh sách OrderItem đã snapshot đơn giá
+            for (OrderItem item : orderItems) {
+                order.addItem(item);
+            }
+
+            savedOrder = orderRepository.save(order);
+            if (savedOrder.getId() == null) {
+                savedOrder.setId(UUID.randomUUID());
+            }
+
+            // 8. Nếu có áp dụng mã giảm giá, gọi promotion-service apply để ghi nhận lượt dùng và chốt slot voucher nguyên tử
+            if (promoCode != null) {
+                VoucherApplyRequest applyRequest = VoucherApplyRequest.builder()
+                        .orderId(savedOrder.getId())
+                        .userId(userId)
+                        .eventId(request.getEventId())
+                        .code(promoCode)
+                        .orderAmount(subtotal)
+                        .build();
+
+                ApiResponse<VoucherCalculationResponse> applyResponse;
+                try {
+                    applyResponse = promotionServiceClient.applyVoucher(internalSecret, applyRequest);
+                } catch (AppException e) {
+                    throw e;
+                } catch (Exception e) {
+                    log.error("Lỗi Feign khi gọi promotion-service applyVoucher cho orderCode={}", savedOrder.getOrderCode(), e);
+                    throw new AppException(ErrorCode.INTERNAL_SERVER_ERROR,
+                            "Không thể áp dụng mã giảm giá do lỗi dịch vụ khuyến mãi, vui lòng thử lại sau");
+                }
+
+                if (applyResponse == null || !applyResponse.isSuccess() || applyResponse.getData() == null) {
+                    String errMsg = applyResponse != null && applyResponse.getMessage() != null && !applyResponse.getMessage().isBlank()
+                            ? applyResponse.getMessage()
+                            : "Không thể áp dụng mã giảm giá cho đơn hàng này";
+                    throw new AppException(ErrorCode.BAD_REQUEST, errMsg);
+                }
+
+                voucherApplied = true;
+            }
+
+            log.info("Tạo đơn hàng thành công: orderCode={}, userId={}, eventId={}, subtotal={}, totalAmount={}, expiresAt={}",
+                    savedOrder.getOrderCode(), userId, savedOrder.getEventId(), savedOrder.getSubtotal(), savedOrder.getTotalAmount(), savedOrder.getExpiresAt());
+
+            return orderMapper.toResponse(savedOrder);
+        } catch (Exception ex) {
+            log.warn("Phát sinh lỗi trong quá trình tạo đơn hàng cho userId={}, showTimeId={}. Tiến hành bù trừ giao dịch (Compensating Rollback)...",
+                    userId, request.getShowTimeId());
+            if (voucherApplied && savedOrder != null) {
+                releaseVoucherForOrder(savedOrder, "REVOKED");
+            }
+            compensateInventoryReservation(request.getShowTimeId(), reservationRequests);
+            throw ex;
+        }
     }
 
     @Override
@@ -586,6 +613,29 @@ public class OrderServiceImpl implements OrderService {
                 && order.getExpiresAt() != null
                 && order.getExpiresAt().isBefore(Instant.now())) {
             expireOrder(order);
+        }
+    }
+
+    private void compensateInventoryReservation(UUID showTimeId, List<TicketItemReservationRequest> reservedItems) {
+        if (showTimeId == null || reservedItems == null || reservedItems.isEmpty()) {
+            return;
+        }
+
+        ReleaseInventoryRequest releaseRequest = ReleaseInventoryRequest.builder()
+                .showTimeId(showTimeId)
+                .items(reservedItems)
+                .build();
+
+        try {
+            ApiResponse<Void> response = eventServiceClient.releaseInventory(internalSecret, releaseRequest);
+            if (response != null && !response.isSuccess()) {
+                log.warn("event-service trả về lỗi khi bù trừ tồn kho cho showTimeId={}: {}",
+                        showTimeId, response.getMessage());
+            } else {
+                log.info("Đã bù trừ (giải phóng) tồn kho thành công cho showTimeId={}", showTimeId);
+            }
+        } catch (Exception e) {
+            log.error("Lỗi Feign khi gọi event-service releaseInventory để bù trừ cho showTimeId={}", showTimeId, e);
         }
     }
 

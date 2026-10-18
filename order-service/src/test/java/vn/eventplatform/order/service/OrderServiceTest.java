@@ -522,6 +522,8 @@ class OrderServiceTest {
 
         when(promotionServiceClient.validateVoucher(eq("test-internal-secret"), any(VoucherValidationRequest.class)))
                 .thenReturn(ApiResponse.ok(voucherCalc));
+        when(promotionServiceClient.applyVoucher(eq("test-internal-secret"), any(VoucherApplyRequest.class)))
+                .thenReturn(ApiResponse.ok(voucherCalc));
 
         when(orderRepository.save(any(Order.class))).thenAnswer(i -> i.getArgument(0));
         when(orderMapper.toResponse(any(Order.class))).thenAnswer(i -> {
@@ -552,10 +554,18 @@ class OrderServiceTest {
         assertThat(savedOrder.getPromotionId()).isEqualTo(promoId);
         assertThat(savedOrder.getDiscountAmount()).isEqualByComparingTo(new BigDecimal("100000"));
         assertThat(savedOrder.getTotalAmount()).isEqualByComparingTo(new BigDecimal("500000"));
+
+        verify(promotionServiceClient).applyVoucher(eq("test-internal-secret"), argThat(req ->
+                req.getOrderId() != null
+                        && req.getUserId().equals(userId)
+                        && req.getEventId().equals(eventId)
+                        && req.getCode().equals(promoCode)
+                        && req.getOrderAmount().compareTo(new BigDecimal("600000")) == 0
+        ));
     }
 
     @Test
-    @DisplayName("Ném ngoại lệ khi Promotion Service từ chối voucher hoặc trả về lỗi")
+    @DisplayName("Ném ngoại lệ khi Promotion Service từ chối voucher hoặc trả về lỗi và bù trừ tồn kho")
     void shouldThrowWhenPromotionServiceRejectsVoucher() {
         UUID userId = UUID.randomUUID();
         UUID eventId = UUID.randomUUID();
@@ -598,6 +608,12 @@ class OrderServiceTest {
                 .hasMessageContaining("Mã giảm giá không hợp lệ hoặc không đủ điều kiện áp dụng");
 
         verify(orderRepository, never()).save(any());
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), argThat(req ->
+                req.getShowTimeId().equals(showTimeId)
+                        && req.getItems().size() == 1
+                        && req.getItems().get(0).getTicketTypeId().equals(ticketTypeId)
+                        && req.getItems().get(0).getQuantity() == 1
+        ));
     }
 
     @Test
@@ -1396,5 +1412,269 @@ class OrderServiceTest {
         assertThatThrownBy(() -> orderService.retryPayment(orderId, retryRequest, strangerId, false, "127.0.0.1"))
                 .isInstanceOf(AppException.class)
                 .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.ACCESS_DENIED));
+    }
+
+    @Test
+    @DisplayName("Atomic Transaction: Rollback đơn hàng và giải phóng tồn kho khi applyVoucher trả về lỗi")
+    void shouldRollbackAndReleaseInventoryWhenApplyVoucherReturnsFailure() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        String promoCode = "LAST_SLOT_VOUCHER";
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(2)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Atomic User")
+                .customerEmail("atomic@example.com")
+                .promotionCode(promoCode)
+                .items(List.of(item))
+                .build();
+
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé VIP")
+                .price(new BigDecimal("300000"))
+                .maxPerOrder(10)
+                .availableQuantity(20)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        VoucherCalculationResponse voucherCalc = VoucherCalculationResponse.builder()
+                .promotionId(promoId)
+                .code(promoCode)
+                .discountAmount(new BigDecimal("50000"))
+                .payableAmount(new BigDecimal("550000"))
+                .build();
+
+        when(promotionServiceClient.validateVoucher(eq("test-internal-secret"), any(VoucherValidationRequest.class)))
+                .thenReturn(ApiResponse.ok(voucherCalc));
+        when(orderRepository.save(any(Order.class))).thenAnswer(i -> {
+            Order o = i.getArgument(0);
+            o.setId(UUID.randomUUID());
+            return o;
+        });
+
+        // Giả lập applyVoucher thất bại do hết lượt đồng thời
+        when(promotionServiceClient.applyVoucher(eq("test-internal-secret"), any(VoucherApplyRequest.class)))
+                .thenReturn(ApiResponse.error("ERR_BAD_REQUEST", "Voucher đã hết lượt sử dụng"));
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Voucher đã hết lượt sử dụng");
+
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), argThat(req ->
+                req.getShowTimeId().equals(showTimeId)
+                        && req.getItems().size() == 1
+                        && req.getItems().get(0).getTicketTypeId().equals(ticketTypeId)
+                        && req.getItems().get(0).getQuantity() == 2
+        ));
+        verify(promotionServiceClient, never()).releaseVoucher(any(), any());
+    }
+
+    @Test
+    @DisplayName("Atomic Transaction: Rollback đơn hàng và giải phóng tồn kho khi applyVoucher ném ngoại lệ")
+    void shouldRollbackAndReleaseInventoryWhenApplyVoucherThrowsException() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        String promoCode = "PROMO_DOWN";
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Atomic User")
+                .customerEmail("atomic@example.com")
+                .promotionCode(promoCode)
+                .items(List.of(item))
+                .build();
+
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé Standard")
+                .price(new BigDecimal("200000"))
+                .maxPerOrder(10)
+                .availableQuantity(20)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        VoucherCalculationResponse voucherCalc = VoucherCalculationResponse.builder()
+                .promotionId(promoId)
+                .code(promoCode)
+                .discountAmount(new BigDecimal("20000"))
+                .payableAmount(new BigDecimal("180000"))
+                .build();
+
+        when(promotionServiceClient.validateVoucher(eq("test-internal-secret"), any(VoucherValidationRequest.class)))
+                .thenReturn(ApiResponse.ok(voucherCalc));
+        when(orderRepository.save(any(Order.class))).thenAnswer(i -> {
+            Order o = i.getArgument(0);
+            o.setId(UUID.randomUUID());
+            return o;
+        });
+
+        when(promotionServiceClient.applyVoucher(eq("test-internal-secret"), any(VoucherApplyRequest.class)))
+                .thenThrow(new AppException(ErrorCode.INTERNAL_SERVER_ERROR, "Dịch vụ mã giảm giá hiện không khả dụng, vui lòng thử lại sau"));
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Dịch vụ mã giảm giá hiện không khả dụng");
+
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), argThat(req ->
+                req.getShowTimeId().equals(showTimeId)
+                        && req.getItems().size() == 1
+                        && req.getItems().get(0).getTicketTypeId().equals(ticketTypeId)
+                        && req.getItems().get(0).getQuantity() == 1
+        ));
+        verify(promotionServiceClient, never()).releaseVoucher(any(), any());
+    }
+
+    @Test
+    @DisplayName("Atomic Transaction: Giải phóng tồn kho khi lưu Order vào DB thất bại")
+    void shouldReleaseInventoryWhenOrderRepositorySaveFails() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(3)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("DB Error User")
+                .customerEmail("dberror@example.com")
+                .items(List.of(item))
+                .build();
+
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé Standard")
+                .price(new BigDecimal("150000"))
+                .maxPerOrder(10)
+                .availableQuantity(20)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        when(orderRepository.save(any(Order.class)))
+                .thenThrow(new RuntimeException("Database constraint violation"));
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Database constraint violation");
+
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), argThat(req ->
+                req.getShowTimeId().equals(showTimeId)
+                        && req.getItems().size() == 1
+                        && req.getItems().get(0).getTicketTypeId().equals(ticketTypeId)
+                        && req.getItems().get(0).getQuantity() == 3
+        ));
+    }
+
+    @Test
+    @DisplayName("Atomic Transaction: Bù trừ cả voucher và tồn kho nếu phát sinh lỗi sau khi applyVoucher đã thành công")
+    void shouldReleaseBothVoucherAndInventoryWhenPostApplyStepFails() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        UUID promoId = UUID.randomUUID();
+        UUID generatedOrderId = UUID.randomUUID();
+        String promoCode = "SUMMER2026";
+
+        CreateOrderItemRequest item = CreateOrderItemRequest.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(2)
+                .build();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Post Apply Error User")
+                .customerEmail("posterror@example.com")
+                .promotionCode(promoCode)
+                .items(List.of(item))
+                .build();
+
+        TicketTypeInventoryDto inv = TicketTypeInventoryDto.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("Vé VIP")
+                .price(new BigDecimal("400000"))
+                .maxPerOrder(10)
+                .availableQuantity(20)
+                .build();
+
+        when(eventServiceClient.checkAndReserveInventory(any(), any()))
+                .thenReturn(ApiResponse.ok(CheckAndReserveInventoryResponse.builder()
+                        .success(true)
+                        .reservedItems(List.of(inv))
+                        .build()));
+
+        VoucherCalculationResponse voucherCalc = VoucherCalculationResponse.builder()
+                .promotionId(promoId)
+                .code(promoCode)
+                .discountAmount(new BigDecimal("100000"))
+                .payableAmount(new BigDecimal("700000"))
+                .build();
+
+        when(promotionServiceClient.validateVoucher(eq("test-internal-secret"), any(VoucherValidationRequest.class)))
+                .thenReturn(ApiResponse.ok(voucherCalc));
+        when(orderRepository.save(any(Order.class))).thenAnswer(i -> {
+            Order o = i.getArgument(0);
+            o.setId(generatedOrderId);
+            return o;
+        });
+        when(promotionServiceClient.applyVoucher(eq("test-internal-secret"), any(VoucherApplyRequest.class)))
+                .thenReturn(ApiResponse.ok(voucherCalc));
+
+        // Giả lập lỗi phát sinh sau khi applyVoucher đã thành công
+        when(orderMapper.toResponse(any(Order.class)))
+                .thenThrow(new RuntimeException("Unexpected mapping error after voucher applied"));
+
+        assertThatThrownBy(() -> orderService.createOrder(userId, request))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Unexpected mapping error after voucher applied");
+
+        verify(promotionServiceClient).releaseVoucher(eq("test-internal-secret"), argThat(req ->
+                req.getOrderId().equals(generatedOrderId) && "REVOKED".equals(req.getReason())
+        ));
+        verify(eventServiceClient).releaseInventory(eq("test-internal-secret"), argThat(req ->
+                req.getShowTimeId().equals(showTimeId)
+                        && req.getItems().size() == 1
+                        && req.getItems().get(0).getTicketTypeId().equals(ticketTypeId)
+                        && req.getItems().get(0).getQuantity() == 2
+        ));
     }
 }
