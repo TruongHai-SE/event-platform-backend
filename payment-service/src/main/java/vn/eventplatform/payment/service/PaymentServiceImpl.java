@@ -135,6 +135,18 @@ public class PaymentServiceImpl implements PaymentService {
                 return result;
             }
 
+            // Verify amount: Số tiền thanh toán VNPay phải khớp chính xác với số tiền đơn hàng
+            if (result.getAmount() != null && result.getAmount().compareTo(paymentToUpdate.getAmount()) != 0) {
+                log.error("Số tiền callback VNPay ({}) không khớp với số tiền đơn hàng ({}) cho paymentId={}",
+                        result.getAmount(), paymentToUpdate.getAmount(), paymentToUpdate.getId());
+                paymentToUpdate.setStatus(PaymentStatus.FAILED);
+                paymentToUpdate.setTransactionId(result.getTransactionId());
+                paymentRepository.save(paymentToUpdate);
+                result.setSuccess(false);
+                result.setMessage("Số tiền thanh toán VNPay không khớp với số tiền đơn hàng");
+                return result;
+            }
+
             paymentToUpdate.setStatus(PaymentStatus.SUCCESS);
             paymentToUpdate.setTransactionId(result.getTransactionId());
             paymentToUpdate.setPaidAt(result.getPayDate() != null ? result.getPayDate() : Instant.now());
