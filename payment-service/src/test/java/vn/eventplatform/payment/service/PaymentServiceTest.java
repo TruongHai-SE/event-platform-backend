@@ -21,6 +21,7 @@ import vn.eventplatform.payment.mapper.PaymentMapper;
 import vn.eventplatform.payment.mapper.RefundLogMapper;
 import vn.eventplatform.payment.payment.PaymentContext;
 import vn.eventplatform.payment.payment.PaymentStrategyFactory;
+import vn.eventplatform.payment.payment.dto.PaymentCallbackResult;
 import vn.eventplatform.payment.payment.dto.PaymentInitResult;
 import vn.eventplatform.payment.payment.strategy.PaymentStrategy;
 import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
@@ -30,6 +31,7 @@ import vn.eventplatform.payment.repository.RefundLogRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -176,5 +178,155 @@ class PaymentServiceTest {
 
         assertThat(response).isNotNull();
         assertThat(response.isSuccess()).isTrue();
+    }
+
+    @Test
+    @DisplayName("retryPayment cancels previous PENDING payments and initializes new gateway payment")
+    void retryPayment_CancelsPreviousPendingPayments_AndInitializesNewGateway() {
+        Payment oldVnpayPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.existsByOrderIdAndStatusIn(eq(orderId), eq(List.of(PaymentStatus.SUCCESS))))
+                .thenReturn(false);
+        when(paymentRepository.findByOrderIdAndStatus(eq(orderId), eq(PaymentStatus.PENDING)))
+                .thenReturn(List.of(oldVnpayPayment));
+
+        Payment newSepayPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.save(any(Payment.class))).thenReturn(newSepayPayment);
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.SEPAY)).thenReturn(paymentStrategy);
+
+        PaymentInitResult initResult = PaymentInitResult.builder()
+                .paymentId(newSepayPayment.getId())
+                .orderId(orderId)
+                .method(PaymentGateway.SEPAY)
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .build();
+
+        when(paymentStrategy.createPaymentUrl(any(PaymentContext.class))).thenReturn(initResult);
+
+        PaymentInitResponse mappedResponse = PaymentInitResponse.builder()
+                .paymentId(newSepayPayment.getId())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentMapper.toInitResponse(newSepayPayment, initResult)).thenReturn(mappedResponse);
+
+        Instant originalExpiresAt = internalOrder.getExpiresAt();
+        vn.eventplatform.payment.dto.InternalRetryPaymentRequest retryRequest =
+                vn.eventplatform.payment.dto.InternalRetryPaymentRequest.builder()
+                        .orderId(orderId)
+                        .orderCode("TKZ-20261018-001")
+                        .amount(new BigDecimal("100000.00"))
+                        .method(PaymentGateway.SEPAY)
+                        .expiresAt(originalExpiresAt)
+                        .customerName("Nguyen Van A")
+                        .customerEmail("test@example.com")
+                        .clientIp("127.0.0.1")
+                        .build();
+
+        PaymentInitResponse response = paymentService.retryPayment(retryRequest);
+
+        assertThat(oldVnpayPayment.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
+        verify(paymentRepository).saveAll(List.of(oldVnpayPayment));
+        assertThat(response).isNotNull();
+        assertThat(response.getMethod()).isEqualTo(PaymentGateway.SEPAY);
+        assertThat(response.getExpiresAt()).isEqualTo(originalExpiresAt);
+    }
+
+    @Test
+    @DisplayName("retryPayment throws BAD_REQUEST when order already has SUCCESS payment")
+    void retryPayment_ThrowsBadRequest_WhenOrderAlreadyPaid() {
+        when(paymentRepository.existsByOrderIdAndStatusIn(eq(orderId), eq(List.of(PaymentStatus.SUCCESS))))
+                .thenReturn(true);
+
+        vn.eventplatform.payment.dto.InternalRetryPaymentRequest retryRequest =
+                vn.eventplatform.payment.dto.InternalRetryPaymentRequest.builder()
+                        .orderId(orderId)
+                        .orderCode("TKZ-20261018-001")
+                        .amount(new BigDecimal("100000.00"))
+                        .method(PaymentGateway.SEPAY)
+                        .expiresAt(Instant.now().plusSeconds(600))
+                        .build();
+
+        assertThatThrownBy(() -> paymentService.retryPayment(retryRequest))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng này đã có giao dịch thanh toán thành công");
+    }
+
+    @Test
+    @DisplayName("retryPayment throws BAD_REQUEST when order expiresAt is in the past")
+    void retryPayment_ThrowsBadRequest_WhenOrderExpired() {
+        when(paymentRepository.existsByOrderIdAndStatusIn(eq(orderId), eq(List.of(PaymentStatus.SUCCESS))))
+                .thenReturn(false);
+
+        vn.eventplatform.payment.dto.InternalRetryPaymentRequest retryRequest =
+                vn.eventplatform.payment.dto.InternalRetryPaymentRequest.builder()
+                        .orderId(orderId)
+                        .orderCode("TKZ-20261018-001")
+                        .amount(new BigDecimal("100000.00"))
+                        .method(PaymentGateway.SEPAY)
+                        .expiresAt(Instant.now().minusSeconds(60))
+                        .build();
+
+        assertThatThrownBy(() -> paymentService.retryPayment(retryRequest))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng đã hết thời gian giữ chỗ thanh toán");
+    }
+
+    @Test
+    @DisplayName("handleVnPayCallback marks payment FAILED when callback amount does not match order amount")
+    void handleVnPayCallback_AmountMismatch() {
+        String orderCode = "TKZ-20261018-001";
+        Map<String, String> params = Map.of("vnp_TxnRef", orderCode);
+
+        PaymentCallbackResult callbackResult = PaymentCallbackResult.builder()
+                .success(true)
+                .orderCode(orderCode)
+                .amount(new BigDecimal("50000.00")) // Paid 50k instead of 100k
+                .transactionId("14000123")
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.verifyCallback(params)).thenReturn(callbackResult);
+
+        Payment payment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        when(paymentRepository.findByOrderCodeAndStatus(orderCode, PaymentStatus.PENDING))
+                .thenReturn(List.of(payment));
+
+        PaymentCallbackResult result = paymentService.handleVnPayCallback(params);
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getMessage()).contains("không khớp");
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.FAILED);
+        verify(paymentRepository).save(payment);
     }
 }

@@ -13,6 +13,7 @@ import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.order.client.EventServiceClient;
+import vn.eventplatform.order.client.PaymentServiceClient;
 import vn.eventplatform.order.client.PromotionServiceClient;
 import vn.eventplatform.order.client.dto.*;
 import vn.eventplatform.order.domain.Order;
@@ -21,7 +22,9 @@ import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
+import vn.eventplatform.order.dto.OrderPaymentInitResponse;
 import vn.eventplatform.order.dto.OrderResponse;
+import vn.eventplatform.order.dto.RetryPaymentRequest;
 import org.springframework.data.jpa.domain.Specification;
 import vn.eventplatform.order.lock.InventoryLockService;
 import vn.eventplatform.order.mapper.OrderMapper;
@@ -46,6 +49,7 @@ public class OrderServiceImpl implements OrderService {
     private final OrderMapper orderMapper;
     private final EventServiceClient eventServiceClient;
     private final PromotionServiceClient promotionServiceClient;
+    private final PaymentServiceClient paymentServiceClient;
     private final InventoryLockService inventoryLockService;
     private final org.springframework.transaction.support.TransactionOperations transactionOperations;
 
@@ -63,10 +67,24 @@ public class OrderServiceImpl implements OrderService {
             OrderMapper orderMapper,
             EventServiceClient eventServiceClient,
             PromotionServiceClient promotionServiceClient,
+            PaymentServiceClient paymentServiceClient,
             InventoryLockService inventoryLockService,
             PlatformTransactionManager transactionManager
     ) {
-        this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, inventoryLockService, new TransactionTemplate(transactionManager));
+        this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient,
+                inventoryLockService, new TransactionTemplate(transactionManager));
+    }
+
+    public OrderServiceImpl(
+            OrderRepository orderRepository,
+            OrderMapper orderMapper,
+            EventServiceClient eventServiceClient,
+            PromotionServiceClient promotionServiceClient,
+            InventoryLockService inventoryLockService,
+            PlatformTransactionManager transactionManager
+    ) {
+        this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, null,
+                inventoryLockService, new TransactionTemplate(transactionManager));
     }
 
     public OrderServiceImpl(
@@ -77,10 +95,24 @@ public class OrderServiceImpl implements OrderService {
             InventoryLockService inventoryLockService,
             org.springframework.transaction.support.TransactionOperations transactionOperations
     ) {
+        this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, null,
+                inventoryLockService, transactionOperations);
+    }
+
+    public OrderServiceImpl(
+            OrderRepository orderRepository,
+            OrderMapper orderMapper,
+            EventServiceClient eventServiceClient,
+            PromotionServiceClient promotionServiceClient,
+            PaymentServiceClient paymentServiceClient,
+            InventoryLockService inventoryLockService,
+            org.springframework.transaction.support.TransactionOperations transactionOperations
+    ) {
         this.orderRepository = orderRepository;
         this.orderMapper = orderMapper;
         this.eventServiceClient = eventServiceClient;
         this.promotionServiceClient = promotionServiceClient;
+        this.paymentServiceClient = paymentServiceClient;
         this.inventoryLockService = inventoryLockService;
         this.transactionOperations = transactionOperations;
     }
@@ -391,6 +423,88 @@ public class OrderServiceImpl implements OrderService {
         );
 
         return orderMapper.toResponse(cancelledOrder);
+    }
+
+    @Override
+    public OrderPaymentInitResponse retryPayment(
+            UUID id,
+            RetryPaymentRequest request,
+            UUID currentUserId,
+            boolean isAdminOrStaff,
+            String clientIp
+    ) {
+        Order order = orderRepository.findByIdWithItems(id)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng"));
+        return retryPaymentInternal(order, request, currentUserId, isAdminOrStaff, clientIp);
+    }
+
+    @Override
+    public OrderPaymentInitResponse retryPaymentByCode(
+            String orderCode,
+            RetryPaymentRequest request,
+            UUID currentUserId,
+            boolean isAdminOrStaff,
+            String clientIp
+    ) {
+        Order order = orderRepository.findByOrderCodeWithItems(orderCode)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng với mã: " + orderCode));
+        return retryPaymentInternal(order, request, currentUserId, isAdminOrStaff, clientIp);
+    }
+
+    private OrderPaymentInitResponse retryPaymentInternal(
+            Order order,
+            RetryPaymentRequest request,
+            UUID currentUserId,
+            boolean isAdminOrStaff,
+            String clientIp
+    ) {
+        validateOrderAccess(order, currentUserId, isAdminOrStaff);
+
+        if (request == null || request.getMethod() == null) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Phương thức thanh toán (method) không được để trống");
+        }
+
+        checkAndHandleExpiredOrder(order);
+
+        if (order.getStatus() == OrderStatus.EXPIRED) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng đã hết thời gian giữ chỗ thanh toán (15 phút)");
+        }
+
+        if (order.getStatus() == OrderStatus.PAID) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng đã được thanh toán, không thể thử lại");
+        }
+
+        if (order.getStatus() != OrderStatus.PENDING) {
+            throw new AppException(ErrorCode.BAD_REQUEST,
+                    "Chỉ có thể thử lại thanh toán cho đơn hàng đang ở trạng thái chờ thanh toán (PENDING)");
+        }
+
+        if (paymentServiceClient == null) {
+            throw new AppException(ErrorCode.INTERNAL_SERVER_ERROR, "Dịch vụ thanh toán chưa được cấu hình");
+        }
+
+        InternalRetryPaymentRequest internalRequest = InternalRetryPaymentRequest.builder()
+                .orderId(order.getId())
+                .orderCode(order.getOrderCode())
+                .amount(order.getTotalAmount())
+                .method(request.getMethod())
+                .expiresAt(order.getExpiresAt())
+                .customerName(order.getCustomerName())
+                .customerEmail(order.getCustomerEmail())
+                .clientIp(clientIp)
+                .build();
+
+        ApiResponse<OrderPaymentInitResponse> response = paymentServiceClient.retryPayment(internalSecret, internalRequest);
+        if (response == null || !response.isSuccess() || response.getData() == null) {
+            String errMsg = response != null && response.getMessage() != null
+                    ? response.getMessage()
+                    : "Không thể khởi tạo lại liên kết thanh toán cho đơn hàng này";
+            throw new AppException(ErrorCode.BAD_REQUEST, errMsg);
+        }
+
+        log.info("Đã khởi tạo lại thanh toán thành công cho đơn hàng: orderCode={}, orderId={}, method={}",
+                order.getOrderCode(), order.getId(), request.getMethod());
+        return response.getData();
     }
 
     @Override
