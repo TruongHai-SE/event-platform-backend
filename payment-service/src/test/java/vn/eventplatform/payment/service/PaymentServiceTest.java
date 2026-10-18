@@ -64,6 +64,9 @@ class PaymentServiceTest {
     private VnPayProperties vnPayProperties;
 
     @Mock
+    private vn.eventplatform.payment.payment.sepay.config.SePayProperties sePayProperties;
+
+    @Mock
     private PaymentStrategy paymentStrategy;
 
     @InjectMocks
@@ -137,5 +140,41 @@ class PaymentServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.getPaymentUrl()).isEqualTo("https://sandbox.vnpayment.vn/pay");
         verify(vnPayProperties).getReturnUrl();
+    }
+
+    @Test
+    @DisplayName("handleSepayWebhook throws UNAUTHORIZED when API key is invalid")
+    void handleSepayWebhook_InvalidApiKey() {
+        when(sePayProperties.validateApiKey("invalid_key")).thenReturn(false);
+
+        vn.eventplatform.payment.dto.sepay.SepayWebhookRequest request = vn.eventplatform.payment.dto.sepay.SepayWebhookRequest.builder()
+                .code("TKZ123456")
+                .transferAmount(BigDecimal.valueOf(100000))
+                .build();
+
+        assertThatThrownBy(() -> paymentService.handleSepayWebhook("invalid_key", request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("API Key SePay không hợp lệ");
+    }
+
+    @Test
+    @DisplayName("handleSepayWebhook returns success true even when order not found (simulation test)")
+    void handleSepayWebhook_OrderNotFound_ReturnsSuccessTrue() {
+        when(sePayProperties.validateApiKey(any())).thenReturn(true);
+        when(paymentRepository.findByNormalizedOrderCodeAndStatus("TKZAL97V2V66WDQRCA93T", PaymentStatus.PENDING))
+                .thenReturn(List.of());
+        when(paymentRepository.findByNormalizedOrderCode("TKZAL97V2V66WDQRCA93T"))
+                .thenReturn(List.of());
+
+        vn.eventplatform.payment.dto.sepay.SepayWebhookRequest request = vn.eventplatform.payment.dto.sepay.SepayWebhookRequest.builder()
+                .code("TKZAL97V2V66WDQRCA93T")
+                .transferAmount(BigDecimal.valueOf(100000))
+                .content("Thanh toan don hang TKZAL97V2V66WDQRCA93T")
+                .build();
+
+        vn.eventplatform.payment.dto.sepay.SepayWebhookResponse response = paymentService.handleSepayWebhook("Apikey sepay_secret_tkz_2026", request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.isSuccess()).isTrue();
     }
 }
