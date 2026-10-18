@@ -1,72 +1,31 @@
 package vn.eventplatform.promotion.mapper;
 
-
-
-
+import org.mapstruct.Mapper;
+import org.mapstruct.Mapping;
+import org.mapstruct.MappingTarget;
+import org.mapstruct.ReportingPolicy;
 import vn.eventplatform.promotion.domain.Promotion;
 import vn.eventplatform.promotion.dto.promotion.PromotionRequest;
 import vn.eventplatform.promotion.dto.promotion.PromotionResponse;
 
 import java.util.List;
 
-public final class PromotionMapper {
+@Mapper(componentModel = "spring", unmappedTargetPolicy = ReportingPolicy.IGNORE)
+public interface PromotionMapper {
+    @Mapping(target = "code", expression = "java(request.code().trim())")
+    Promotion toEntity(PromotionRequest request);
 
-    private PromotionMapper() {
-    }
+    PromotionResponse toResponse(Promotion promotion);
 
-    // Request -> Entity (CREATE)
-    public static Promotion toEntity(PromotionRequest request) {
-        Promotion promotion = new Promotion();
+    List<PromotionResponse> toResponseList(List<Promotion> promotions);
 
-        updateEntity(request, promotion);
-
-        return promotion;
-    }
-
-    // Entity -> Response
-    public static PromotionResponse toResponse(Promotion promotion) {
-        return new PromotionResponse(
-                promotion.getId(),
-                promotion.getEventId(),
-                promotion.getOrganizerId(),
-                promotion.getCode(),
-                promotion.getDiscountType(),
-                promotion.getDiscountValue(),
-                promotion.getMinOrderAmount(),
-                promotion.getMaxDiscountAmount(),
-                promotion.getTotalUsageLimit(),
-                promotion.getUsedCount(),
-                promotion.getMaxUsagePerUser(),
-                promotion.getIsCompensation(),
-                promotion.getValidFrom(),
-                promotion.getValidTo(),
-                promotion.getIsActive(),
-                promotion.getCreatedAt()
-        );
-    }
-
-    // List<Entity> -> List<Response>
-    public static List<PromotionResponse> toResponseList(
-            List<Promotion> promotions
-    ) {
-        return promotions.stream()
-                .map(PromotionMapper::toResponse)
-                .toList();
-    }
-
-    // Request -> Existing Entity (UPDATE)
-    public static void updateEntity(
-            PromotionRequest request,
-            Promotion promotion
-    ) {
-        promotion.setCode(request.code().trim());
-        promotion.setDiscountType(request.discountType());
-        promotion.setDiscountValue(request.discountValue());
-        promotion.setMinOrderAmount(request.minOrderAmount());
-        promotion.setMaxDiscountAmount(request.maxDiscountAmount());
-        promotion.setTotalUsageLimit(request.totalUsageLimit());
-        promotion.setMaxUsagePerUser(request.maxUsagePerUser());
-        promotion.setValidFrom(request.validFrom());
-        promotion.setValidTo(request.validTo());
-    }
+    @Mapping(target = "code", expression = "java(request.code().trim())")
+    @Mapping(target = "id", ignore = true)
+    @Mapping(target = "createdAt", ignore = true)
+    @Mapping(target = "updatedAt", ignore = true)
+    @Mapping(target = "organizerId", ignore = true)
+    @Mapping(target = "usedCount", ignore = true)
+    @Mapping(target = "isCompensation", ignore = true)
+    @Mapping(target = "isActive", ignore = true)
+    void updateEntity(PromotionRequest request, @MappingTarget Promotion promotion);
 }

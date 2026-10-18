@@ -26,6 +26,7 @@ import java.util.UUID;
 public class PromotionService {
     private final PromotionRepository repository;
     private final PromotionUsageRepository usageRepository;
+    private final PromotionMapper promotionMapper;
 
     @Transactional
     public PromotionResponse createForOrganizer(PromotionRequest request) {
@@ -39,17 +40,17 @@ public class PromotionService {
 
     @Transactional(readOnly = true)
     public List<PromotionResponse> findAllForOrganizer() {
-        return PromotionMapper.toResponseList(repository.findByOrganizerId(currentUserId()));
+        return promotionMapper.toResponseList(repository.findByOrganizerId(currentUserId()));
     }
 
     @Transactional(readOnly = true)
     public List<PromotionResponse> findAllForAdmin() {
-        return PromotionMapper.toResponseList(repository.findAll());
+        return promotionMapper.toResponseList(repository.findAll());
     }
 
     @Transactional(readOnly = true)
     public PromotionResponse findByIdForOrganizer(UUID id) {
-        return PromotionMapper.toResponse(findOrganizerPromotion(id));
+        return promotionMapper.toResponse(findOrganizerPromotion(id));
     }
 
     /**
@@ -65,21 +66,21 @@ public class PromotionService {
 
     @Transactional(readOnly = true)
     public PromotionResponse findByIdForAdmin(UUID id) {
-        return PromotionMapper.toResponse(findPromotion(id));
+        return promotionMapper.toResponse(findPromotion(id));
     }
 
     @Transactional
     public PromotionResponse updateForOrganizer(UUID id, PromotionRequest request) {
         Promotion promotion = findOrganizerPromotion(id);
         update(promotion, request, currentUserId(), false);
-        return PromotionMapper.toResponse(repository.save(promotion));
+        return promotionMapper.toResponse(repository.save(promotion));
     }
 
     @Transactional
     public PromotionResponse updateForAdmin(UUID id, PromotionRequest request) {
         Promotion promotion = findPromotion(id);
         update(promotion, request, request.organizerId(), true);
-        return PromotionMapper.toResponse(repository.save(promotion));
+        return promotionMapper.toResponse(repository.save(promotion));
     }
 
     @Transactional
@@ -97,12 +98,12 @@ public class PromotionService {
         if (!admin && Boolean.TRUE.equals(request.isCompensation())) {
             throw new AccessDeniedException("Chỉ quản trị viên được tạo voucher bồi hoàn");
         }
-        Promotion promotion = PromotionMapper.toEntity(request);
+        Promotion promotion = promotionMapper.toEntity(request);
         promotion.setOrganizerId(ownerId);
         promotion.setUsedCount(0);
         promotion.setIsActive(request.isActive() == null || request.isActive());
         promotion.setIsCompensation(admin && Boolean.TRUE.equals(request.isCompensation()));
-        return PromotionMapper.toResponse(repository.save(promotion));
+        return promotionMapper.toResponse(repository.save(promotion));
     }
 
     private void update(Promotion promotion, PromotionRequest request, UUID ownerId, boolean admin) {
@@ -111,7 +112,7 @@ public class PromotionService {
         if (!admin && Boolean.TRUE.equals(request.isCompensation())) {
             throw new AccessDeniedException("Chỉ quản trị viên được tạo voucher bồi hoàn");
         }
-        PromotionMapper.updateEntity(request, promotion);
+        promotionMapper.updateEntity(request, promotion);
         promotion.setOrganizerId(ownerId);
         promotion.setEventId(request.eventId());
         if (admin) {

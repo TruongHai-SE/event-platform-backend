@@ -6,20 +6,25 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import vn.eventplatform.ad.domain.AdCampaign;
+import vn.eventplatform.ad.domain.AdBill;
 import vn.eventplatform.ad.domain.AdPackage;
 import vn.eventplatform.ad.domain.Banner;
 import vn.eventplatform.ad.domain.AdPositionPrice;
 import vn.eventplatform.ad.dto.Requests;
 import vn.eventplatform.ad.enums.BannerPosition;
+import vn.eventplatform.ad.enums.AdBillStatus;
 import vn.eventplatform.ad.enums.CampaignStatus;
 import vn.eventplatform.ad.enums.PricingMode;
 import vn.eventplatform.ad.repository.AdCampaignRepository;
+import vn.eventplatform.ad.repository.AdBillRepository;
 import vn.eventplatform.ad.repository.AdPackageRepository;
 import vn.eventplatform.ad.repository.BannerRepository;
 import vn.eventplatform.ad.repository.AdPositionPriceRepository;
 import vn.eventplatform.ad.repository.CampaignPositionRepository;
+import vn.eventplatform.ad.mapper.AdMapper;
 import vn.eventplatform.common.exception.AppException;
 
 import java.math.BigDecimal;
@@ -32,6 +37,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
+import org.mapstruct.factory.Mappers;
 
 @ExtendWith(MockitoExtension.class)
 class AdServiceTest {
@@ -40,6 +46,8 @@ class AdServiceTest {
     @Mock private BannerRepository banners;
     @Mock private AdPositionPriceRepository positionPrices;
     @Mock private CampaignPositionRepository campaignPositions;
+    @Mock private AdBillRepository bills;
+    @Spy private AdMapper mapper = Mappers.getMapper(AdMapper.class);
     @InjectMocks private AdService service;
 
     private UUID packageId;
@@ -73,6 +81,7 @@ class AdServiceTest {
         assertThat(result.totalPrice()).isEqualByComparingTo("170.00");
         assertThat(result.feeAmount()).isEqualByComparingTo("170.00");
         assertThat(result.escrowAmount()).isEqualByComparingTo(BigDecimal.ZERO);
+        verify(bills).save(argThat(bill -> bill.getStatus() == AdBillStatus.PAID));
     }
 
     @Test
@@ -87,12 +96,14 @@ class AdServiceTest {
         AdCampaign campaign = captor.getValue();
         campaign.setId(UUID.randomUUID());
         when(campaigns.findById(campaign.getId())).thenReturn(Optional.of(campaign));
+        when(bills.findByCampaignId(campaign.getId())).thenReturn(Optional.empty());
 
         service.publishSettlement(campaign.getId());
 
         assertThat(campaign.getFeeAmount()).isEqualByComparingTo("170.00");
         assertThat(campaign.getEscrowAmount()).isEqualByComparingTo("170.00");
         assertThat(campaign.getSettlementPublished()).isTrue();
+        verify(bills).save(argThat(bill -> bill.getStatus() == AdBillStatus.PENDING_PAYMENT));
     }
 
     @Test
