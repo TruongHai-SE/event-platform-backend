@@ -13,6 +13,8 @@ public interface PaymentService {
 
     PaymentInitResponse createPayment(CreatePaymentRequest request, String clientIp);
 
+    PaymentInitResponse retryPayment(InternalRetryPaymentRequest request);
+
     PaymentCallbackResult handleVnPayCallback(Map<String, String> allParams);
 
     SepayWebhookResponse handleSepayWebhook(String authHeader, SepayWebhookRequest request);

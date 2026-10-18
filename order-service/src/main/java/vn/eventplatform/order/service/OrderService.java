@@ -6,7 +6,9 @@ import vn.eventplatform.order.domain.Order;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderFilterRequest;
+import vn.eventplatform.order.dto.OrderPaymentInitResponse;
 import vn.eventplatform.order.dto.OrderResponse;
+import vn.eventplatform.order.dto.RetryPaymentRequest;
 
 import java.util.UUID;
 
@@ -31,6 +33,10 @@ public interface OrderService {
     OrderResponse cancelOrder(UUID id, UUID currentUserId, boolean isAdminOrStaff);
 
     OrderResponse cancelOrderByCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff);
+
+    OrderPaymentInitResponse retryPayment(UUID id, RetryPaymentRequest request, UUID currentUserId, boolean isAdminOrStaff, String clientIp);
+
+    OrderPaymentInitResponse retryPaymentByCode(String orderCode, RetryPaymentRequest request, UUID currentUserId, boolean isAdminOrStaff, String clientIp);
 
     int releaseExpiredOrders();
 

@@ -371,4 +371,78 @@ class OrderControllerTest {
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.data.orderCode").value(orderCode));
     }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333")
+    @DisplayName("API POST /api/v1/orders/{id}/retry-payment: Đổi cổng và khởi tạo lại thanh toán thành công")
+    void shouldRetryPaymentByIdSuccessfully() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        UUID orderId = UUID.randomUUID();
+        UUID paymentId = UUID.randomUUID();
+        Instant expiresAt = Instant.now().plusSeconds(600);
+
+        vn.eventplatform.order.dto.RetryPaymentRequest request = vn.eventplatform.order.dto.RetryPaymentRequest.builder()
+                .method(vn.eventplatform.order.domain.PaymentGatewayType.SEPAY)
+                .build();
+
+        vn.eventplatform.order.dto.OrderPaymentInitResponse initResponse = vn.eventplatform.order.dto.OrderPaymentInitResponse.builder()
+                .paymentId(paymentId)
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-RETRY")
+                .method(vn.eventplatform.order.domain.PaymentGatewayType.SEPAY)
+                .amount(new BigDecimal("500000"))
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018RETRY")
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018RETRY")
+                .status("PENDING")
+                .expiresAt(expiresAt)
+                .build();
+
+        when(orderService.retryPayment(eq(orderId), any(vn.eventplatform.order.dto.RetryPaymentRequest.class), eq(userId), eq(false), any()))
+                .thenReturn(initResponse);
+
+        mockMvc.perform(post("/api/v1/orders/" + orderId + "/retry-payment")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.message").value("Khởi tạo lại thanh toán thành công"))
+                .andExpect(jsonPath("$.data.method").value("SEPAY"))
+                .andExpect(jsonPath("$.data.orderCode").value("TKZ-20261018-RETRY"))
+                .andExpect(jsonPath("$.data.qrCode").value("https://qr.sepay.vn/img?des=TKZ20261018RETRY"));
+    }
+
+    @Test
+    @WithMockUser(username = "33333333-3333-3333-3333-333333333333")
+    @DisplayName("API POST /api/v1/orders/code/{orderCode}/retry-payment: Đổi cổng theo mã đơn thành công")
+    void shouldRetryPaymentByCodeSuccessfully() throws Exception {
+        UUID userId = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        String orderCode = "TKZ-20261018-RETRY-CODE";
+
+        vn.eventplatform.order.dto.RetryPaymentRequest request = vn.eventplatform.order.dto.RetryPaymentRequest.builder()
+                .method(vn.eventplatform.order.domain.PaymentGatewayType.VNPAY)
+                .build();
+
+        vn.eventplatform.order.dto.OrderPaymentInitResponse initResponse = vn.eventplatform.order.dto.OrderPaymentInitResponse.builder()
+                .paymentId(UUID.randomUUID())
+                .orderId(UUID.randomUUID())
+                .orderCode(orderCode)
+                .method(vn.eventplatform.order.domain.PaymentGatewayType.VNPAY)
+                .amount(new BigDecimal("250000"))
+                .paymentUrl("https://sandbox.vnpayment.vn/paymentv2/vpcpay.html")
+                .status("PENDING")
+                .build();
+
+        when(orderService.retryPaymentByCode(eq(orderCode), any(vn.eventplatform.order.dto.RetryPaymentRequest.class), eq(userId), eq(false), any()))
+                .thenReturn(initResponse);
+
+        mockMvc.perform(post("/api/v1/orders/code/" + orderCode + "/retry-payment")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.method").value("VNPAY"))
+                .andExpect(jsonPath("$.data.paymentUrl").value("https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"));
+    }
 }

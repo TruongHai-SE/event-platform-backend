@@ -2,6 +2,7 @@ package vn.eventplatform.order.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -23,7 +24,9 @@ import vn.eventplatform.order.domain.OrderStatus;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderFilterRequest;
+import vn.eventplatform.order.dto.OrderPaymentInitResponse;
 import vn.eventplatform.order.dto.OrderResponse;
+import vn.eventplatform.order.dto.RetryPaymentRequest;
 import vn.eventplatform.order.service.OrderService;
 
 import java.time.Instant;
@@ -166,6 +169,38 @@ public class OrderController {
         return ResponseEntity.ok(ApiResponse.ok("Hủy đơn hàng thành công, tồn kho vé đã được giải phóng", response));
     }
 
+    @PostMapping("/{id}/retry-payment")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Thử lại thanh toán hoặc đổi cổng thanh toán cho đơn hàng đang giữ chỗ (theo ID)")
+    public ResponseEntity<ApiResponse<OrderPaymentInitResponse>> retryPayment(
+            @PathVariable("id") UUID id,
+            @Valid @RequestBody RetryPaymentRequest request,
+            Authentication authentication,
+            HttpServletRequest httpServletRequest
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        String clientIp = extractClientIp(httpServletRequest);
+        OrderPaymentInitResponse response = orderService.retryPayment(id, request, currentUserId, isAdminOrStaff, clientIp);
+        return ResponseEntity.ok(ApiResponse.ok("Khởi tạo lại thanh toán thành công", response));
+    }
+
+    @PostMapping("/code/{orderCode}/retry-payment")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Thử lại thanh toán hoặc đổi cổng thanh toán cho đơn hàng đang giữ chỗ (theo mã đơn hàng)")
+    public ResponseEntity<ApiResponse<OrderPaymentInitResponse>> retryPaymentByCode(
+            @PathVariable("orderCode") String orderCode,
+            @Valid @RequestBody RetryPaymentRequest request,
+            Authentication authentication,
+            HttpServletRequest httpServletRequest
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        String clientIp = extractClientIp(httpServletRequest);
+        OrderPaymentInitResponse response = orderService.retryPaymentByCode(orderCode, request, currentUserId, isAdminOrStaff, clientIp);
+        return ResponseEntity.ok(ApiResponse.ok("Khởi tạo lại thanh toán thành công", response));
+    }
+
     @GetMapping("/my-orders")
     @PreAuthorize("isAuthenticated()")
     @Operation(summary = "Lấy danh sách đơn hàng của người dùng hiện tại có hỗ trợ lọc và phân trang")
@@ -225,5 +260,20 @@ public class OrderController {
                         || "ADMIN".equals(a.getAuthority())
                         || "ROLE_STAFF".equals(a.getAuthority())
                         || "STAFF".equals(a.getAuthority()));
+    }
+
+    private String extractClientIp(HttpServletRequest request) {
+        if (request == null) {
+            return "127.0.0.1";
+        }
+        String xForwardedFor = request.getHeader("X-Forwarded-For");
+        if (xForwardedFor != null && !xForwardedFor.trim().isEmpty()) {
+            return xForwardedFor.split(",")[0].trim();
+        }
+        String xRealIp = request.getHeader("X-Real-IP");
+        if (xRealIp != null && !xRealIp.trim().isEmpty()) {
+            return xRealIp.trim();
+        }
+        return request.getRemoteAddr();
     }
 }
