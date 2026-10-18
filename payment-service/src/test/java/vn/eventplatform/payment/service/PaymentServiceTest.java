@@ -22,6 +22,7 @@ import vn.eventplatform.payment.mapper.RefundLogMapper;
 import vn.eventplatform.payment.payment.PaymentContext;
 import vn.eventplatform.payment.payment.PaymentStrategyFactory;
 import vn.eventplatform.payment.payment.dto.PaymentInitResult;
+import vn.eventplatform.payment.payment.dto.PaymentCallbackResult;
 import vn.eventplatform.payment.payment.strategy.PaymentStrategy;
 import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
 import vn.eventplatform.payment.repository.PaymentRepository;
@@ -30,6 +31,7 @@ import vn.eventplatform.payment.repository.RefundLogRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -176,5 +178,38 @@ class PaymentServiceTest {
 
         assertThat(response).isNotNull();
         assertThat(response.isSuccess()).isTrue();
+    }
+
+    @Test
+    @DisplayName("handleVnPayCallback marks payment as FAILED and returns success false when amount mismatches")
+    void handleVnPayCallback_AmountMismatch() {
+        String orderCode = "TKZ-20261018-001";
+        Payment existingPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        PaymentCallbackResult callbackResult = PaymentCallbackResult.builder()
+                .success(true)
+                .orderCode(orderCode)
+                .transactionId("VNP123456")
+                .amount(new BigDecimal("50000.00")) // mismatched amount
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.verifyCallback(any())).thenReturn(callbackResult);
+        when(paymentRepository.findByOrderCodeAndStatus(orderCode, PaymentStatus.PENDING))
+                .thenReturn(List.of(existingPayment));
+
+        PaymentCallbackResult result = paymentService.handleVnPayCallback(Map.of("vnp_TxnRef", orderCode));
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getMessage()).contains("Số tiền thanh toán VNPay không khớp");
+        assertThat(existingPayment.getStatus()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(existingPayment.getTransactionId()).isEqualTo("VNP123456");
+        verify(paymentRepository).save(existingPayment);
     }
 }
