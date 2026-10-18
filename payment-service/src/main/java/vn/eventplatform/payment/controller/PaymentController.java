@@ -11,6 +11,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.payment.dto.*;
+import vn.eventplatform.payment.dto.sepay.SepayWebhookRequest;
+import vn.eventplatform.payment.dto.sepay.SepayWebhookResponse;
 import vn.eventplatform.payment.payment.dto.PaymentCallbackResult;
 import vn.eventplatform.payment.service.PaymentService;
 
@@ -46,6 +48,18 @@ public class PaymentController {
         log.info("Nhận callback từ VNPay: {}", allParams);
         PaymentCallbackResult result = paymentService.handleVnPayCallback(allParams);
         return ResponseEntity.ok(ApiResponse.ok(result));
+    }
+
+    @PostMapping("/sepay/webhook")
+    @Operation(summary = "Nhận webhook thông báo giao dịch từ cổng thanh toán SePay", description = "Xác thực API Key, bóc tách mã thanh toán và cập nhật đơn hàng thành công")
+    public ResponseEntity<SepayWebhookResponse> handleSepayWebhook(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody SepayWebhookRequest request
+    ) {
+        log.info("Nhận Webhook từ SePay: id={}, code={}, amount={}, content={}",
+                request.getId(), request.getCode(), request.getTransferAmount(), request.getContent());
+        SepayWebhookResponse response = paymentService.handleSepayWebhook(authHeader, request);
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/{id}")

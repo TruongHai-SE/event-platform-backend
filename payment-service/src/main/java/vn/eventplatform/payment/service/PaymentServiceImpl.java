@@ -24,6 +24,9 @@ import vn.eventplatform.payment.payment.dto.RefundResult;
 import vn.eventplatform.payment.repository.PaymentRepository;
 import vn.eventplatform.payment.repository.RefundLogRepository;
 
+import vn.eventplatform.payment.dto.sepay.SepayWebhookRequest;
+import vn.eventplatform.payment.dto.sepay.SepayWebhookResponse;
+import vn.eventplatform.payment.payment.sepay.config.SePayProperties;
 import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
 
 import java.net.URI;
@@ -31,6 +34,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -44,6 +49,7 @@ public class PaymentServiceImpl implements PaymentService {
     private final RefundLogMapper refundLogMapper;
     private final OrderServiceClient orderServiceClient;
     private final VnPayProperties vnPayProperties;
+    private final SePayProperties sePayProperties;
 
     @Value("${security.internal.secret}")
     private String internalSecret;
@@ -161,6 +167,117 @@ public class PaymentServiceImpl implements PaymentService {
         }
 
         return result;
+    }
+
+    @Override
+    @Transactional
+    public SepayWebhookResponse handleSepayWebhook(String authHeader, SepayWebhookRequest request) {
+        log.info("Xử lý Webhook SePay: id={}, code={}, amount={}, content={}",
+                request.getId(), request.getCode(), request.getTransferAmount(), request.getContent());
+
+        // 1. Xác thực API Key
+        if (!sePayProperties.validateApiKey(authHeader)) {
+            log.error("Xác thực API Key SePay thất bại: authHeader={}", authHeader);
+            throw new AppException(ErrorCode.UNAUTHORIZED, "API Key SePay không hợp lệ");
+        }
+
+        // 2. Tìm mã thanh toán từ trường code hoặc từ content
+        String rawCode = request.getCode();
+        if (rawCode == null || rawCode.trim().isEmpty()) {
+            rawCode = extractCodeFromContent(request.getContent());
+        }
+
+        if (rawCode == null || rawCode.trim().isEmpty()) {
+            log.warn("SePay webhook không tìm thấy mã thanh toán: id={}, content={}", request.getId(), request.getContent());
+            return SepayWebhookResponse.builder()
+                    .success(true)
+                    .message("Không tìm thấy mã thanh toán trong nội dung chuyển khoản")
+                    .build();
+        }
+
+        // 3. Tìm giao dịch Payment tương ứng (bằng cách chuẩn hóa bỏ dấu '-')
+        List<Payment> pendingPayments = paymentRepository.findByNormalizedOrderCodeAndStatus(rawCode, PaymentStatus.PENDING);
+        Payment paymentToUpdate;
+        if (!pendingPayments.isEmpty()) {
+            paymentToUpdate = pendingPayments.get(0);
+        } else {
+            List<Payment> payments = paymentRepository.findByNormalizedOrderCode(rawCode);
+            paymentToUpdate = payments.isEmpty() ? null : payments.get(0);
+        }
+
+        if (paymentToUpdate == null) {
+            log.warn("Không tìm thấy giao dịch Payment tương ứng với code={}. Có thể là giao dịch test từ SePay.", rawCode);
+            return SepayWebhookResponse.builder()
+                    .success(true)
+                    .message("Giao dịch hợp lệ nhưng không tìm thấy đơn hàng tương ứng (hoặc giao dịch test)")
+                    .build();
+        }
+
+        // 4. Kiểm tra idempotent
+        if (paymentToUpdate.getStatus() == PaymentStatus.SUCCESS) {
+            log.info("Giao dịch Payment {} đã ở trạng thái SUCCESS (idempotent webhook)", paymentToUpdate.getId());
+            return SepayWebhookResponse.builder()
+                    .success(true)
+                    .message("Giao dịch đã được xử lý trước đó")
+                    .build();
+        }
+
+        // 5. Kiểm tra số tiền chuyển khoản
+        if (request.getTransferAmount() != null && request.getTransferAmount().compareTo(paymentToUpdate.getAmount()) < 0) {
+            log.warn("Số tiền chuyển khoản ({}) nhỏ hơn số tiền cần thanh toán ({}) cho paymentId={}",
+                    request.getTransferAmount(), paymentToUpdate.getAmount(), paymentToUpdate.getId());
+            return SepayWebhookResponse.builder()
+                    .success(true)
+                    .message("Số tiền chuyển khoản không đủ")
+                    .build();
+        }
+
+        // 6. Cập nhật trạng thái Payment sang SUCCESS
+        String transactionId = request.getReferenceCode() != null && !request.getReferenceCode().isEmpty()
+                ? request.getReferenceCode()
+                : (request.getId() != null ? String.valueOf(request.getId()) : "SEPAY-" + System.currentTimeMillis());
+
+        paymentToUpdate.setStatus(PaymentStatus.SUCCESS);
+        paymentToUpdate.setTransactionId(transactionId);
+        paymentToUpdate.setPaidAt(Instant.now());
+        paymentRepository.save(paymentToUpdate);
+
+        // 7. Gọi order-service để chuyển trạng thái Order sang PAID
+        OrderMarkPaidRequest markPaidRequest = OrderMarkPaidRequest.builder()
+                .paymentId(paymentToUpdate.getId())
+                .transactionId(transactionId)
+                .paymentMethod(PaymentGateway.SEPAY.name())
+                .paidAt(paymentToUpdate.getPaidAt())
+                .build();
+
+        try {
+            ApiResponse<InternalOrderResponse> orderUpdateRes = orderServiceClient.markOrderPaid(
+                    internalSecret, paymentToUpdate.getOrderId(), markPaidRequest);
+            if (orderUpdateRes != null && orderUpdateRes.isSuccess()) {
+                log.info("Đã cập nhật trạng thái PAID cho đơn hàng từ SePay: orderId={}", paymentToUpdate.getOrderId());
+            } else {
+                log.warn("Gọi order-service markOrderPaid từ SePay trả về không thành công: {}", orderUpdateRes);
+            }
+        } catch (Exception e) {
+            log.error("Lỗi Feign khi gọi order-service markOrderPaid cho orderId={}", paymentToUpdate.getOrderId(), e);
+        }
+
+        return SepayWebhookResponse.builder()
+                .success(true)
+                .message("Xử lý thanh toán thành công")
+                .build();
+    }
+
+    private String extractCodeFromContent(String content) {
+        if (content == null || content.isEmpty()) {
+            return null;
+        }
+        Pattern pattern = Pattern.compile("(?i)TKZ[A-Z0-9-]{6,25}");
+        Matcher matcher = pattern.matcher(content);
+        if (matcher.find()) {
+            return matcher.group();
+        }
+        return null;
     }
 
     @Override

@@ -28,6 +28,13 @@ payment:
     pay-url: ${VNPAY_PAY_URL:https://sandbox.vnpayment.vn/paymentv2/vpcpay.html}
     return-url: ${VNPAY_RETURN_URL:http://localhost:5173/payment/vnpay-callback}
     api-url: ${VNPAY_API_URL:https://sandbox.vnpayment.vn/merchant_webapi/api/transaction}
+  sepay:
+    api-key: ${SEPAY_API_KEY:sepay_secret_tkz_2026}
+    account-number: ${SEPAY_BANK_ACCOUNT:0000000001}
+    bank-name: ${SEPAY_BANK_NAME:MBBank}
+    qr-template: ${SEPAY_QR_TEMPLATE:compact}
+    qr-base-url: ${SEPAY_QR_BASE_URL:https://qr.sepay.vn/img}
+
 
 security:
   token:
