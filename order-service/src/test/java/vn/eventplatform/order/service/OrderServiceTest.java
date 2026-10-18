@@ -67,6 +67,9 @@ class OrderServiceTest {
     private PromotionServiceClient promotionServiceClient;
 
     @Mock
+    private vn.eventplatform.order.client.PaymentServiceClient paymentServiceClient;
+
+    @Mock
     private vn.eventplatform.order.lock.InventoryLockService inventoryLockService;
 
     private final org.springframework.transaction.support.TransactionOperations transactionOperations =
@@ -95,7 +98,7 @@ class OrderServiceTest {
             return null;
         }).when(inventoryLockService).executeWithLock(any(), any(), any(Runnable.class));
 
-        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, inventoryLockService, transactionOperations);
+        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient, inventoryLockService, transactionOperations);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
         lenient().when(orderRepository.updateOrderStatusIfMatch(any(), any(), any(), any())).thenReturn(1);
     }
@@ -1277,5 +1280,121 @@ class OrderServiceTest {
         assertThatThrownBy(() -> orderService.cancelOrderByCode(orderCode, userId, false))
                 .isInstanceOf(AppException.class)
                 .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST));
+    }
+
+    @Test
+    @DisplayName("Thử lại thanh toán (đổi cổng): Thành công khi đơn hàng đang PENDING và còn trong hạn 15 phút")
+    void shouldRetryPaymentSuccessfullyAndPreserveExpiresAt() {
+        UUID userId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+        String orderCode = "TKZ-20261018-RETRY01";
+        Instant expiresAt = Instant.now().plusSeconds(600);
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode(orderCode)
+                .userId(userId)
+                .totalAmount(new BigDecimal("350000"))
+                .customerName("Nguyen Van B")
+                .customerEmail("vanb@example.com")
+                .status(OrderStatus.PENDING)
+                .expiresAt(expiresAt)
+                .build();
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        vn.eventplatform.order.dto.OrderPaymentInitResponse expectedInitResponse =
+                vn.eventplatform.order.dto.OrderPaymentInitResponse.builder()
+                        .paymentId(UUID.randomUUID())
+                        .orderId(orderId)
+                        .orderCode(orderCode)
+                        .method(vn.eventplatform.order.domain.PaymentGatewayType.SEPAY)
+                        .amount(new BigDecimal("350000"))
+                        .qrCode("https://qr.sepay.vn/img?des=TKZ20261018RETRY01")
+                        .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018RETRY01")
+                        .status("PENDING")
+                        .expiresAt(expiresAt)
+                        .build();
+
+        when(paymentServiceClient.retryPayment(eq("test-internal-secret"), any()))
+                .thenReturn(ApiResponse.ok(expectedInitResponse));
+
+        vn.eventplatform.order.dto.RetryPaymentRequest retryRequest =
+                vn.eventplatform.order.dto.RetryPaymentRequest.builder()
+                        .method(vn.eventplatform.order.domain.PaymentGatewayType.SEPAY)
+                        .build();
+
+        vn.eventplatform.order.dto.OrderPaymentInitResponse result =
+                orderService.retryPayment(orderId, retryRequest, userId, false, "127.0.0.1");
+
+        assertThat(result).isNotNull();
+        assertThat(result.getMethod()).isEqualTo(vn.eventplatform.order.domain.PaymentGatewayType.SEPAY);
+        assertThat(result.getExpiresAt()).isEqualTo(expiresAt);
+        assertThat(result.getQrCode()).contains("TKZ20261018RETRY01");
+        verify(paymentServiceClient, times(1)).retryPayment(eq("test-internal-secret"), any());
+    }
+
+    @Test
+    @DisplayName("Thử lại thanh toán: Tự động chuyển EXPIRED, giải phóng vé và ném BAD_REQUEST khi đơn hàng đã quá hạn 15 phút")
+    void shouldExpireOrderAndThrowBadRequestWhenRetryingExpiredOrder() {
+        UUID userId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        String orderCode = "TKZ-20261018-EXPIRED01";
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode(orderCode)
+                .userId(userId)
+                .showTimeId(showTimeId)
+                .totalAmount(new BigDecimal("200000"))
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(30))
+                .build();
+        order.addItem(OrderItem.builder().ticketTypeId(ticketTypeId).quantity(1).build());
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        vn.eventplatform.order.dto.RetryPaymentRequest retryRequest =
+                vn.eventplatform.order.dto.RetryPaymentRequest.builder()
+                        .method(vn.eventplatform.order.domain.PaymentGatewayType.VNPAY)
+                        .build();
+
+        assertThatThrownBy(() -> orderService.retryPayment(orderId, retryRequest, userId, false, "127.0.0.1"))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST))
+                .hasMessageContaining("hết thời gian giữ chỗ thanh toán");
+
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.EXPIRED);
+        verify(eventServiceClient, times(1)).releaseInventory(eq("test-internal-secret"), any());
+        verify(paymentServiceClient, never()).retryPayment(any(), any());
+    }
+
+    @Test
+    @DisplayName("Thử lại thanh toán: Ném ACCESS_DENIED khi người dùng không phải chủ đơn hàng")
+    void shouldThrowAccessDeniedWhenRetryingPaymentForAnotherUserOrder() {
+        UUID ownerId = UUID.randomUUID();
+        UUID strangerId = UUID.randomUUID();
+        UUID orderId = UUID.randomUUID();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261018-OTHER")
+                .userId(ownerId)
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().plusSeconds(600))
+                .build();
+
+        when(orderRepository.findByIdWithItems(orderId)).thenReturn(Optional.of(order));
+
+        vn.eventplatform.order.dto.RetryPaymentRequest retryRequest =
+                vn.eventplatform.order.dto.RetryPaymentRequest.builder()
+                        .method(vn.eventplatform.order.domain.PaymentGatewayType.VNPAY)
+                        .build();
+
+        assertThatThrownBy(() -> orderService.retryPayment(orderId, retryRequest, strangerId, false, "127.0.0.1"))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.ACCESS_DENIED));
     }
 }
