@@ -58,6 +58,52 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
     }
 
+    @ExceptionHandler(org.springframework.web.bind.MissingServletRequestParameterException.class)
+    public ResponseEntity<ApiResponse<Void>> handleMissingParameter(
+            org.springframework.web.bind.MissingServletRequestParameterException ex) {
+        log.warn("Missing required query parameter: {}", ex.getParameterName());
+        ApiResponse<Void> response = ApiResponse.error(
+                ErrorCode.BAD_REQUEST.getCode(),
+                "Thiếu tham số bắt buộc: " + ex.getParameterName()
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
+    }
+
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiResponse<Void>> handleTypeMismatch(
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException ex) {
+        log.warn("Parameter type mismatch for '{}': {}", ex.getName(), ex.getMessage());
+        ApiResponse<Void> response = ApiResponse.error(
+                ErrorCode.BAD_REQUEST.getCode(),
+                "Tham số '" + ex.getName() + "' không đúng định dạng yêu cầu"
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
+    }
+
+    @ExceptionHandler(org.springframework.dao.DataIntegrityViolationException.class)
+    public ResponseEntity<ApiResponse<Void>> handleDataIntegrityViolation(
+            org.springframework.dao.DataIntegrityViolationException ex) {
+        log.warn("Database integrity violation: {}", ex.getMostSpecificCause().getMessage());
+        ApiResponse<Void> response = ApiResponse.error(
+                ErrorCode.CONFLICT.getCode(),
+                "Dữ liệu bị trùng lặp hoặc vi phạm ràng buộc toàn vẹn"
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+    }
+
+    @ExceptionHandler({
+            org.springframework.orm.ObjectOptimisticLockingFailureException.class,
+            org.springframework.dao.PessimisticLockingFailureException.class
+    })
+    public ResponseEntity<ApiResponse<Void>> handleConcurrencyLockingFailure(Exception ex) {
+        log.warn("Concurrent modification / locking conflict: {}", ex.getMessage());
+        ApiResponse<Void> response = ApiResponse.error(
+                ErrorCode.CONFLICT.getCode(),
+                "Dữ liệu vừa được cập nhật bởi một giao dịch khác, vui lòng thử lại"
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ApiResponse<Void>> handleIllegalArgumentException(IllegalArgumentException ex) {
         log.warn("Illegal argument: {}", ex.getMessage());
@@ -77,7 +123,7 @@ public class GlobalExceptionHandler {
         log.error("Unhandled exception: ", ex);
         ApiResponse<Void> response = ApiResponse.error(
                 ErrorCode.INTERNAL_SERVER_ERROR.getCode(),
-                "Đã xảy ra lỗi hệ thống không mong muốn: " + ex.getMessage()
+                ErrorCode.INTERNAL_SERVER_ERROR.getMessage()
         );
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
     }
