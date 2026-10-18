@@ -28,5 +28,11 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID> {
     @Query("SELECT p FROM Payment p WHERE p.orderCode = :orderCode AND p.status = :status ORDER BY p.createdAt DESC")
     List<Payment> findByOrderCodeAndStatus(@Param("orderCode") String orderCode, @Param("status") PaymentStatus status);
 
+    @Query("SELECT p FROM Payment p WHERE REPLACE(p.orderCode, '-', '') = REPLACE(:orderCode, '-', '') AND p.status = :status ORDER BY p.createdAt DESC")
+    List<Payment> findByNormalizedOrderCodeAndStatus(@Param("orderCode") String orderCode, @Param("status") PaymentStatus status);
+
+    @Query("SELECT p FROM Payment p WHERE REPLACE(p.orderCode, '-', '') = REPLACE(:orderCode, '-', '') ORDER BY p.createdAt DESC")
+    List<Payment> findByNormalizedOrderCode(@Param("orderCode") String orderCode);
+
     boolean existsByOrderIdAndStatusIn(UUID orderId, List<PaymentStatus> statuses);
 }
