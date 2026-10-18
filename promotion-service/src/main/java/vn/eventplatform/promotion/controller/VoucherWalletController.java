@@ -8,7 +8,10 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import vn.eventplatform.common.dto.ApiResponse;
+import vn.eventplatform.promotion.dto.voucher.VoucherCalculationResponse;
 import vn.eventplatform.promotion.dto.voucher.VoucherIssueRequest;
+import vn.eventplatform.promotion.dto.voucher.VoucherPreviewRequest;
+import vn.eventplatform.promotion.dto.voucher.VoucherValidationRequest;
 import vn.eventplatform.promotion.dto.voucher.WalletVoucherResponse;
 import vn.eventplatform.promotion.service.VoucherApplicationService;
 
@@ -23,6 +26,21 @@ public class VoucherWalletController {
     @GetMapping("/api/v1/vouchers/wallet")
     public ResponseEntity<ApiResponse<List<WalletVoucherResponse>>> wallet(Authentication authentication) {
         return ResponseEntity.ok(ApiResponse.ok(voucherApplicationService.wallet(UUID.fromString(authentication.getPrincipal().toString()))));
+    }
+
+    @PostMapping("/api/v1/vouchers/validate")
+    public ResponseEntity<ApiResponse<VoucherCalculationResponse>> validate(
+            Authentication authentication,
+            @Valid @RequestBody VoucherPreviewRequest request
+    ) {
+        UUID userId = UUID.fromString(authentication.getPrincipal().toString());
+        VoucherValidationRequest validationRequest = new VoucherValidationRequest(
+                userId,
+                request.eventId(),
+                request.code(),
+                request.orderAmount()
+        );
+        return ResponseEntity.ok(ApiResponse.ok(voucherApplicationService.validate(validationRequest)));
     }
 
     @PostMapping("/api/v1/admin/vouchers/{promotionId}/issue")

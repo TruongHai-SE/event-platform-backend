@@ -121,6 +121,52 @@ class InternalVoucherControllerIntegrationTest {
     }
 
     @Test
+    void userCanValidateVoucherPreviewBeforeCreatingOrder() throws Exception {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        Promotion promotion = promotionRepository.save(Promotion.builder()
+                .code("PREVIEW" + UUID.randomUUID().toString().substring(0, 5))
+                .eventId(eventId)
+                .discountType(DiscountType.PERCENTAGE)
+                .discountValue(new BigDecimal("20"))
+                .maxDiscountAmount(new BigDecimal("50000"))
+                .minOrderAmount(new BigDecimal("100000"))
+                .usedCount(0)
+                .totalUsageLimit(5)
+                .isActive(true)
+                .isCompensation(false)
+                .build());
+
+        String userToken = token(userId, "ROLE_ATTENDEE");
+
+        mockMvc.perform(post("/api/v1/vouchers/validate")
+                        .header("Authorization", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json(Map.of(
+                                "eventId", eventId,
+                                "code", promotion.getCode(),
+                                "orderAmount", 200000
+                        ))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.promotionId").value(promotion.getId().toString()))
+                .andExpect(jsonPath("$.data.code").value(promotion.getCode()))
+                .andExpect(jsonPath("$.data.discountAmount").value(40000.0))
+                .andExpect(jsonPath("$.data.payableAmount").value(160000.0));
+
+        mockMvc.perform(post("/api/v1/vouchers/validate")
+                        .header("Authorization", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json(Map.of(
+                                "eventId", eventId,
+                                "code", promotion.getCode(),
+                                "orderAmount", 50000
+                        ))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.success").value(false));
+    }
+
+    @Test
     void organizerCanOnlyManageOwnVoucher() throws Exception {
         UUID organizerId = UUID.randomUUID();
         String organizerToken = token(organizerId, "ROLE_ORGANIZER");
