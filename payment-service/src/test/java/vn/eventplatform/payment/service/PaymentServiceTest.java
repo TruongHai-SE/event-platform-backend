@@ -46,6 +46,8 @@ import org.mockito.ArgumentCaptor;
 import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
 import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
 import vn.eventplatform.common.messaging.event.PaymentFailedEventPayload;
+import vn.eventplatform.common.messaging.event.PaymentSuccessEventPayload;
+import vn.eventplatform.payment.client.dto.InternalOrderItemResponse;
 import vn.eventplatform.payment.dto.sepay.SepayWebhookRequest;
 import vn.eventplatform.payment.dto.sepay.SepayWebhookResponse;
 
@@ -86,19 +88,40 @@ class PaymentServiceTest {
     private PaymentServiceImpl paymentService;
 
     private UUID orderId;
+    private UUID userId;
+    private UUID eventId;
+    private UUID showTimeId;
+    private UUID ticketTypeId;
     private InternalOrderResponse internalOrder;
 
     @BeforeEach
     void setUp() {
         orderId = UUID.randomUUID();
+        userId = UUID.randomUUID();
+        eventId = UUID.randomUUID();
+        showTimeId = UUID.randomUUID();
+        ticketTypeId = UUID.randomUUID();
+
+        InternalOrderItemResponse item = InternalOrderItemResponse.builder()
+                .ticketTypeId(ticketTypeId)
+                .ticketTypeName("VIP")
+                .quantity(2)
+                .unitPrice(new BigDecimal("50000.00"))
+                .subtotal(new BigDecimal("100000.00"))
+                .build();
+
         internalOrder = InternalOrderResponse.builder()
                 .id(orderId)
                 .orderCode("TKZ-20261018-001")
+                .userId(userId)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
                 .totalAmount(new BigDecimal("100000.00"))
                 .status("PENDING")
                 .customerEmail("test@example.com")
                 .customerName("Nguyen Van A")
                 .expiresAt(Instant.now().plusSeconds(900))
+                .items(List.of(item))
                 .build();
 
         ReflectionTestUtils.setField(paymentService, "internalSecret", "secret123");
@@ -727,6 +750,29 @@ class PaymentServiceTest {
                 eq(pendingPayment.getId()), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), eq("VNP12345678"), any(), any());
         verify(paymentRepository).cancelOtherPendingPayments(eq(orderId), eq(pendingPayment.getId()), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any());
         verify(orderServiceClient).markOrderPaid(eq("secret123"), eq(orderId), any());
+
+        ArgumentCaptor<PaymentSuccessEventPayload> payloadCaptor = ArgumentCaptor.forClass(PaymentSuccessEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_SUCCESS),
+                payloadCaptor.capture()
+        );
+        PaymentSuccessEventPayload published = payloadCaptor.getValue();
+        assertThat(published.getPaymentId()).isEqualTo(pendingPayment.getId());
+        assertThat(published.getOrderId()).isEqualTo(orderId);
+        assertThat(published.getOrderCode()).isEqualTo(orderCode);
+        assertThat(published.getUserId()).isEqualTo(userId);
+        assertThat(published.getEventId()).isEqualTo(eventId);
+        assertThat(published.getShowTimeId()).isEqualTo(showTimeId);
+        assertThat(published.getAmount()).isEqualByComparingTo("100000.00");
+        assertThat(published.getPaymentMethod()).isEqualTo("VNPAY");
+        assertThat(published.getTransactionId()).isEqualTo("VNP12345678");
+        assertThat(published.getCustomerName()).isEqualTo("Nguyen Van A");
+        assertThat(published.getCustomerEmail()).isEqualTo("test@example.com");
+        assertThat(published.getItems()).hasSize(1);
+        assertThat(published.getItems().get(0).getTicketTypeId()).isEqualTo(ticketTypeId);
+        assertThat(published.getItems().get(0).getTicketTypeName()).isEqualTo("VIP");
+        assertThat(published.getItems().get(0).getQuantity()).isEqualTo(2);
     }
 
     @Test
@@ -762,6 +808,7 @@ class PaymentServiceTest {
         assertThat(result.isSuccess()).isTrue();
         verify(paymentRepository, never()).updatePaymentStatusIfMatch(any(), any(), any(), any(), any(), any());
         verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+        verify(eventPublisher, never()).publish(eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS), any(), any());
     }
 
     @Test
@@ -809,6 +856,7 @@ class PaymentServiceTest {
 
         assertThat(result.isSuccess()).isTrue();
         verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+        verify(eventPublisher, never()).publish(eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS), any(), any());
     }
 
     @Test
@@ -850,6 +898,24 @@ class PaymentServiceTest {
                 eq(pendingPayment.getId()), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), eq("REF99999"), any(), any());
         verify(paymentRepository).cancelOtherPendingPayments(eq(orderId), eq(pendingPayment.getId()), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any());
         verify(orderServiceClient).markOrderPaid(eq("secret123"), eq(orderId), any());
+
+        ArgumentCaptor<PaymentSuccessEventPayload> sepayPayloadCaptor = ArgumentCaptor.forClass(PaymentSuccessEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_SUCCESS),
+                sepayPayloadCaptor.capture()
+        );
+        PaymentSuccessEventPayload sepayPublished = sepayPayloadCaptor.getValue();
+        assertThat(sepayPublished.getPaymentId()).isEqualTo(pendingPayment.getId());
+        assertThat(sepayPublished.getOrderId()).isEqualTo(orderId);
+        assertThat(sepayPublished.getOrderCode()).isEqualTo("TKZ-20261018-001");
+        assertThat(sepayPublished.getUserId()).isEqualTo(userId);
+        assertThat(sepayPublished.getEventId()).isEqualTo(eventId);
+        assertThat(sepayPublished.getShowTimeId()).isEqualTo(showTimeId);
+        assertThat(sepayPublished.getPaymentMethod()).isEqualTo("SEPAY");
+        assertThat(sepayPublished.getTransactionId()).isEqualTo("REF99999");
+        assertThat(sepayPublished.getItems()).hasSize(1);
+        assertThat(sepayPublished.getItems().get(0).getTicketTypeId()).isEqualTo(ticketTypeId);
     }
 
     @Test
@@ -885,6 +951,7 @@ class PaymentServiceTest {
         assertThat(response.getMessage()).contains("trước đó");
         verify(paymentRepository, never()).updatePaymentStatusIfMatch(any(), any(), any(), any(), any(), any());
         verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+        verify(eventPublisher, never()).publish(eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS), any(), any());
     }
 
     @Test
@@ -931,6 +998,7 @@ class PaymentServiceTest {
         assertThat(response.isSuccess()).isTrue();
         assertThat(response.getMessage()).contains("trước đó");
         verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+        verify(eventPublisher, never()).publish(eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS), any(), any());
     }
 }
 
