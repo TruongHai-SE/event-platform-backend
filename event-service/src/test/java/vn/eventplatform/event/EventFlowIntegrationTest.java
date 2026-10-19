@@ -694,6 +694,30 @@ class EventFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("PUBLISHED"));
 
+        // 2.1 Public Showtime Inventories API
+        mockMvc.perform(get("/api/v1/events/public/showtimes/" + showTimeId + "/inventories"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").isArray())
+                .andExpect(jsonPath("$.data[0].showTimeId").value(showTimeId.toString()))
+                .andExpect(jsonPath("$.data[0].ticketTypeId").value(ticketTypeId.toString()))
+                .andExpect(jsonPath("$.data[0].totalQuantity").value(20))
+                .andExpect(jsonPath("$.data[0].availableQuantity").value(20));
+
+        // 2.2 Public Showtime Inventories API - Non-existent showtime -> 404
+        mockMvc.perform(get("/api/v1/events/public/showtimes/" + UUID.randomUUID() + "/inventories"))
+                .andExpect(status().isNotFound());
+
+        // 2.3 Internal Showtime Inventories API - Wrong secret -> 401
+        mockMvc.perform(get("/internal/v1/events/inventory/showtimes/" + showTimeId)
+                        .header("X-Internal-Secret", "wrong-secret"))
+                .andExpect(status().isUnauthorized());
+
+        // 2.4 Internal Showtime Inventories API - Valid secret -> 200
+        mockMvc.perform(get("/internal/v1/events/inventory/showtimes/" + showTimeId)
+                        .header("X-Internal-Secret", "test_internal_secret_for_mock_verification"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].availableQuantity").value(20));
+
         // 3. Sabotage: Requesting quantity (15) > maxPerOrder (10) -> 400 BAD_REQUEST
         InternalInventoryDto.CheckAndReserveInventoryRequest exceedMaxReq =
                 InternalInventoryDto.CheckAndReserveInventoryRequest.builder()

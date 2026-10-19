@@ -12,7 +12,9 @@ import vn.eventplatform.event.domain.TicketType;
 import vn.eventplatform.event.domain.enums.EventStatus;
 import vn.eventplatform.event.domain.enums.InventoryUpdateStatus;
 import vn.eventplatform.event.domain.enums.ShowTimeStatus;
+import vn.eventplatform.event.dto.EventDto;
 import vn.eventplatform.event.dto.InternalInventoryDto;
+import vn.eventplatform.event.mapper.EventMapper;
 import vn.eventplatform.event.repository.EventRepository;
 import vn.eventplatform.event.repository.ShowTimeRepository;
 import vn.eventplatform.event.repository.ShowTimeTicketInventoryRepository;
@@ -33,6 +35,7 @@ public class InventoryInternalService {
     private final EventRepository eventRepository;
     private final ShowTimeRepository showTimeRepository;
     private final ShowTimeTicketInventoryRepository inventoryRepository;
+    private final EventMapper eventMapper;
 
     @Transactional
     public InternalInventoryDto.CheckAndReserveInventoryResponse checkAndReserve(
@@ -203,5 +206,16 @@ public class InventoryInternalService {
                 .refundFeePercent(event.getRefundFeePercentage())
                 .nextShowTime(nextShowTime)
                 .build();
+    }
+
+    @Transactional(readOnly = true)
+    public List<EventDto.TicketInventoryResponse> getShowTimeInventories(UUID showTimeId) {
+        if (!showTimeRepository.existsById(showTimeId)) {
+            throw new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy suất diễn");
+        }
+        List<ShowTimeTicketInventory> inventories = inventoryRepository.findByShowTimeIdWithTicketType(showTimeId);
+        return inventories.stream()
+                .map(eventMapper::toTicketInventoryResponse)
+                .toList();
     }
 }
