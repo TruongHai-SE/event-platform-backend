@@ -274,19 +274,52 @@ public class PaymentServiceImpl implements PaymentService {
             if (result.getAmount() != null && result.getAmount().compareTo(paymentToUpdate.getAmount()) != 0) {
                 log.error("Số tiền callback VNPay ({}) không khớp với số tiền đơn hàng ({}) cho paymentId={}",
                         result.getAmount(), paymentToUpdate.getAmount(), paymentToUpdate.getId());
-                paymentToUpdate.setStatus(PaymentStatus.FAILED);
-                paymentToUpdate.setTransactionId(result.getTransactionId());
-                paymentRepository.save(paymentToUpdate);
+                int updatedRows = paymentRepository.updatePaymentStatusIfMatch(
+                        paymentToUpdate.getId(),
+                        PaymentStatus.FAILED,
+                        PaymentStatus.PENDING,
+                        result.getTransactionId(),
+                        null,
+                        Instant.now()
+                );
+                if (updatedRows > 0) {
+                    paymentToUpdate.setStatus(PaymentStatus.FAILED);
+                    paymentToUpdate.setTransactionId(result.getTransactionId());
+                    publishPaymentFailedEvent(paymentToUpdate, "Số tiền thanh toán VNPay không khớp với số tiền đơn hàng");
+                }
                 result.setSuccess(false);
                 result.setMessage("Số tiền thanh toán VNPay không khớp với số tiền đơn hàng");
-                publishPaymentFailedEvent(paymentToUpdate, "Số tiền thanh toán VNPay không khớp với số tiền đơn hàng");
+                return result;
+            }
+
+            Instant paidAt = result.getPayDate() != null ? result.getPayDate() : Instant.now();
+            Instant now = Instant.now();
+            int updatedRows = paymentRepository.updatePaymentStatusIfMatch(
+                    paymentToUpdate.getId(),
+                    PaymentStatus.SUCCESS,
+                    PaymentStatus.PENDING,
+                    result.getTransactionId(),
+                    paidAt,
+                    now
+            );
+
+            if (updatedRows == 0) {
+                // Kiểm tra nếu luồng song song khác đã cập nhật sang SUCCESS trước đó
+                Payment reloaded = paymentRepository.findById(paymentToUpdate.getId()).orElse(paymentToUpdate);
+                if (reloaded.getStatus() == PaymentStatus.SUCCESS) {
+                    log.info("Giao dịch Payment {} đã ở trạng thái SUCCESS bởi luồng khác (idempotent callback)", paymentToUpdate.getId());
+                    return result;
+                }
+                log.warn("Không thể chuyển trạng thái Payment {} sang SUCCESS vì trạng thái hiện tại là {}",
+                        paymentToUpdate.getId(), reloaded.getStatus());
+                result.setSuccess(false);
+                result.setMessage("Giao dịch thanh toán không còn ở trạng thái hợp lệ");
                 return result;
             }
 
             paymentToUpdate.setStatus(PaymentStatus.SUCCESS);
             paymentToUpdate.setTransactionId(result.getTransactionId());
-            paymentToUpdate.setPaidAt(result.getPayDate() != null ? result.getPayDate() : Instant.now());
-            paymentRepository.save(paymentToUpdate);
+            paymentToUpdate.setPaidAt(paidAt);
 
             cancelOtherPendingPayments(paymentToUpdate.getOrderId(), paymentToUpdate.getId());
 
@@ -311,10 +344,19 @@ public class PaymentServiceImpl implements PaymentService {
         } else {
             if (paymentToUpdate.getStatus() == PaymentStatus.PENDING
                     && (paymentToUpdate.getMethod() == null || paymentToUpdate.getMethod() == PaymentGateway.VNPAY)) {
-                paymentToUpdate.setStatus(PaymentStatus.FAILED);
-                paymentToUpdate.setTransactionId(result.getTransactionId());
-                paymentRepository.save(paymentToUpdate);
-                publishPaymentFailedEvent(paymentToUpdate, result.getMessage() != null ? result.getMessage() : "Thanh toán VNPay thất bại");
+                int updatedRows = paymentRepository.updatePaymentStatusIfMatch(
+                        paymentToUpdate.getId(),
+                        PaymentStatus.FAILED,
+                        PaymentStatus.PENDING,
+                        result.getTransactionId(),
+                        null,
+                        Instant.now()
+                );
+                if (updatedRows > 0) {
+                    paymentToUpdate.setStatus(PaymentStatus.FAILED);
+                    paymentToUpdate.setTransactionId(result.getTransactionId());
+                    publishPaymentFailedEvent(paymentToUpdate, result.getMessage() != null ? result.getMessage() : "Thanh toán VNPay thất bại");
+                }
             }
         }
 
@@ -370,7 +412,7 @@ public class PaymentServiceImpl implements PaymentService {
                     .build();
         }
 
-        // 4. Kiểm tra idempotent
+        // 4. Kiểm tra idempotent sơ bộ (nếu bản ghi đã ở trạng thái SUCCESS)
         if (paymentToUpdate.getStatus() == PaymentStatus.SUCCESS) {
             log.info("Giao dịch Payment {} đã ở trạng thái SUCCESS (idempotent webhook)", paymentToUpdate.getId());
             return SepayWebhookResponse.builder()
@@ -390,15 +432,41 @@ public class PaymentServiceImpl implements PaymentService {
                     .build();
         }
 
-        // 6. Cập nhật trạng thái Payment sang SUCCESS
+        // 6. Cập nhật trạng thái Payment sang SUCCESS bằng conditional update
         String transactionId = request.getReferenceCode() != null && !request.getReferenceCode().isEmpty()
                 ? request.getReferenceCode()
                 : (request.getId() != null ? String.valueOf(request.getId()) : "SEPAY-" + System.currentTimeMillis());
 
+        Instant now = Instant.now();
+        int updatedRows = paymentRepository.updatePaymentStatusIfMatch(
+                paymentToUpdate.getId(),
+                PaymentStatus.SUCCESS,
+                PaymentStatus.PENDING,
+                transactionId,
+                now,
+                now
+        );
+
+        if (updatedRows == 0) {
+            Payment reloaded = paymentRepository.findById(paymentToUpdate.getId()).orElse(paymentToUpdate);
+            if (reloaded.getStatus() == PaymentStatus.SUCCESS) {
+                log.info("Giao dịch Payment {} đã ở trạng thái SUCCESS bởi luồng song song (idempotent webhook)", paymentToUpdate.getId());
+                return SepayWebhookResponse.builder()
+                        .success(true)
+                        .message("Giao dịch đã được xử lý trước đó")
+                        .build();
+            }
+            log.warn("Không thể cập nhật Payment {} sang SUCCESS vì trạng thái hiện tại là {}",
+                    paymentToUpdate.getId(), reloaded.getStatus());
+            return SepayWebhookResponse.builder()
+                    .success(false)
+                    .message("Giao dịch không còn ở trạng thái hợp lệ để thanh toán")
+                    .build();
+        }
+
         paymentToUpdate.setStatus(PaymentStatus.SUCCESS);
         paymentToUpdate.setTransactionId(transactionId);
-        paymentToUpdate.setPaidAt(Instant.now());
-        paymentRepository.save(paymentToUpdate);
+        paymentToUpdate.setPaidAt(now);
 
         cancelOtherPendingPayments(paymentToUpdate.getOrderId(), paymentToUpdate.getId());
 
@@ -432,16 +500,15 @@ public class PaymentServiceImpl implements PaymentService {
         if (orderId == null) {
             return;
         }
-        List<Payment> remainingPending = paymentRepository.findByOrderIdAndStatus(orderId, PaymentStatus.PENDING);
-        if (remainingPending == null || remainingPending.isEmpty()) {
-            return;
-        }
-        List<Payment> toCancel = remainingPending.stream()
-                .filter(p -> !p.getId().equals(currentSuccessPaymentId))
-                .toList();
-        if (!toCancel.isEmpty()) {
-            toCancel.forEach(p -> p.setStatus(PaymentStatus.CANCELLED));
-            paymentRepository.saveAll(toCancel);
+        int cancelled = paymentRepository.cancelOtherPendingPayments(
+                orderId,
+                currentSuccessPaymentId,
+                PaymentStatus.CANCELLED,
+                PaymentStatus.PENDING,
+                Instant.now()
+        );
+        if (cancelled > 0) {
+            log.info("Đã hủy {} giao dịch PENDING khác của orderId={}", cancelled, orderId);
         }
     }
 
