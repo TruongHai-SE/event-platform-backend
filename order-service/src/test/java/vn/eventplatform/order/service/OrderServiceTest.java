@@ -109,6 +109,15 @@ class OrderServiceTest {
         orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient, inventoryLockService, transactionOperations, eventPublisher);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
         lenient().when(orderRepository.updateOrderStatusIfMatch(any(), any(), any(), any())).thenReturn(1);
+        lenient().when(orderMapper.toResponse(any(Order.class))).thenAnswer(invocation -> {
+            Order o = invocation.getArgument(0);
+            return vn.eventplatform.order.dto.OrderResponse.builder()
+                    .id(o.getId())
+                    .orderCode(o.getOrderCode())
+                    .status(o.getStatus())
+                    .totalAmount(o.getTotalAmount())
+                    .build();
+        });
     }
 
     @Test
@@ -1474,7 +1483,6 @@ class OrderServiceTest {
                 .build();
 
         when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
-        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
 
         vn.eventplatform.order.dto.OrderMarkPaidRequest request =
                 vn.eventplatform.order.dto.OrderMarkPaidRequest.builder()
@@ -1499,6 +1507,106 @@ class OrderServiceTest {
         assertThat(published.getTransactionId()).isEqualTo("VNP123456");
         assertThat(published.getPaymentMethod()).isEqualTo("VNPAY");
         assertThat(published.getTotalAmount()).isEqualByComparingTo("250000.00");
+    }
+
+    @Test
+    @DisplayName("markOrderPaid trả về idempotent khi đơn hàng đã ở trạng thái PAID và không publish duplicate event")
+    void markOrderPaid_Idempotent_WhenAlreadyPaid() {
+        UUID orderId = UUID.randomUUID();
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-ALREADYPAID")
+                .status(OrderStatus.PAID)
+                .totalAmount(new BigDecimal("250000.00"))
+                .build();
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+
+        vn.eventplatform.order.dto.OrderMarkPaidRequest request =
+                vn.eventplatform.order.dto.OrderMarkPaidRequest.builder()
+                        .transactionId("VNP123456")
+                        .paymentMethod("VNPAY")
+                        .build();
+
+        vn.eventplatform.order.dto.OrderResponse response = orderService.markOrderPaid(orderId, request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(OrderStatus.PAID);
+        verify(orderRepository, org.mockito.Mockito.never()).updateOrderStatusIfMatch(any(), any(), any(), any());
+        verify(eventPublisher, org.mockito.Mockito.never()).publish(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("markOrderPaid xử lý race condition: luồng runner-up phát hiện PAID thì trả về idempotent mà không publish event")
+    void markOrderPaid_RaceCondition_RunnerUpReturnsIdempotentResponse() {
+        UUID orderId = UUID.randomUUID();
+        Order initialPendingOrder = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-CONCURRENT")
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("300000.00"))
+                .build();
+
+        Order winnerPaidOrder = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-CONCURRENT")
+                .status(OrderStatus.PAID)
+                .totalAmount(new BigDecimal("300000.00"))
+                .build();
+
+        when(orderRepository.findById(orderId))
+                .thenReturn(Optional.of(initialPendingOrder))
+                .thenReturn(Optional.of(winnerPaidOrder));
+        when(orderRepository.updateOrderStatusIfMatch(eq(orderId), eq(OrderStatus.PAID), eq(OrderStatus.PENDING), any()))
+                .thenReturn(0);
+
+        vn.eventplatform.order.dto.OrderMarkPaidRequest request =
+                vn.eventplatform.order.dto.OrderMarkPaidRequest.builder()
+                        .transactionId("VNP999")
+                        .paymentMethod("VNPAY")
+                        .build();
+
+        vn.eventplatform.order.dto.OrderResponse response = orderService.markOrderPaid(orderId, request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(OrderStatus.PAID);
+        verify(eventPublisher, org.mockito.Mockito.never()).publish(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("markOrderPaid throws BAD_REQUEST khi conditional update thất bại và đơn hàng không ở trạng thái PAID")
+    void markOrderPaid_ThrowsBadRequest_WhenConditionalUpdateFailsAndStatusNotPaid() {
+        UUID orderId = UUID.randomUUID();
+        Order initialPendingOrder = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-CANCELLED")
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("300000.00"))
+                .build();
+
+        Order cancelledOrder = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-CANCELLED")
+                .status(OrderStatus.CANCELLED)
+                .totalAmount(new BigDecimal("300000.00"))
+                .build();
+
+        when(orderRepository.findById(orderId))
+                .thenReturn(Optional.of(initialPendingOrder))
+                .thenReturn(Optional.of(cancelledOrder));
+        when(orderRepository.updateOrderStatusIfMatch(eq(orderId), eq(OrderStatus.PAID), eq(OrderStatus.PENDING), any()))
+                .thenReturn(0);
+
+        vn.eventplatform.order.dto.OrderMarkPaidRequest request =
+                vn.eventplatform.order.dto.OrderMarkPaidRequest.builder()
+                        .transactionId("VNP999")
+                        .paymentMethod("VNPAY")
+                        .build();
+
+        assertThatThrownBy(() -> orderService.markOrderPaid(orderId, request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng không còn ở trạng thái PENDING");
+        verify(eventPublisher, org.mockito.Mockito.never()).publish(any(), any(), any());
     }
 
     @Test

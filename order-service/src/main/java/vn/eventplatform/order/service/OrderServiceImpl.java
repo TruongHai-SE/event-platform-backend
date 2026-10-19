@@ -744,13 +744,23 @@ public class OrderServiceImpl implements OrderService {
             throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng không ở trạng thái PENDING");
         }
 
+        int updatedRows = orderRepository.updateOrderStatusIfMatch(id, OrderStatus.PAID, OrderStatus.PENDING, Instant.now());
+        if (updatedRows == 0) {
+            Order reloadedOrder = orderRepository.findById(id).orElse(order);
+            if (reloadedOrder.getStatus() == OrderStatus.PAID) {
+                log.info("Đơn hàng {} đã được cập nhật sang PAID bởi luồng song song (idempotent duplicate)", order.getOrderCode());
+                return orderMapper.toResponse(reloadedOrder);
+            }
+            log.warn("Không thể chuyển sang PAID vì trạng thái hiện tại của đơn hàng {} là {}", order.getOrderCode(), reloadedOrder.getStatus());
+            throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng không còn ở trạng thái PENDING");
+        }
+
         order.setStatus(OrderStatus.PAID);
-        Order savedOrder = orderRepository.save(order);
-        log.info("Đơn hàng {} đã được cập nhật sang trạng thái PAID thành công", savedOrder.getOrderCode());
+        log.info("Đơn hàng {} đã được cập nhật sang trạng thái PAID thành công", order.getOrderCode());
 
-        publishOrderPaidEvent(savedOrder, request);
+        publishOrderPaidEvent(order, request);
 
-        return orderMapper.toResponse(savedOrder);
+        return orderMapper.toResponse(order);
     }
 
     private List<OrderItemEventPayload> toOrderItemPayloads(Order order) {
