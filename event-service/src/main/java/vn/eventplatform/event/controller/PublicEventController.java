@@ -21,6 +21,7 @@ import vn.eventplatform.event.service.EventService;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -62,5 +63,14 @@ public class PublicEventController {
             @RequestParam(value = "showTimeId", required = false) UUID showTimeId
     ) {
         return ResponseEntity.ok(ApiResponse.ok(eventService.getPublicEventDetail(idOrSlug, showTimeId)));
+    }
+
+    @GetMapping("/showtimes/{showTimeId}/inventories")
+    @Operation(summary = "Lấy danh sách tồn kho vé theo suất diễn công khai (gọn nhẹ phục vụ đặt vé)")
+    public ResponseEntity<ApiResponse<List<EventDto.TicketInventoryResponse>>> getPublicShowTimeInventories(
+            @PathVariable("showTimeId") UUID showTimeId
+    ) {
+        List<EventDto.TicketInventoryResponse> inventories = eventService.getPublicShowTimeInventories(showTimeId);
+        return ResponseEntity.ok(ApiResponse.ok("Lấy danh sách tồn kho vé thành công", inventories));
     }
 }

@@ -963,6 +963,37 @@ public class EventService {
         return buildEventDetailResponse(event, showTimeIdForSeatMap);
     }
 
+    @Transactional(readOnly = true)
+    public List<EventDto.TicketInventoryResponse> getPublicShowTimeInventories(UUID showTimeId) {
+        ShowTime showTime = showTimeRepository.findById(showTimeId)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy suất diễn"));
+
+        Event event = showTime.getEvent();
+        if (event == null || (event.getStatus() != EventStatus.PUBLISHED && event.getStatus() != EventStatus.ENDED)) {
+            throw new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy sự kiện công khai");
+        }
+
+        if (showTime.getStatus() == ShowTimeStatus.CANCELLED) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Suất diễn đã bị hủy");
+        }
+
+        List<ShowTimeTicketInventory> inventories = inventoryRepository.findByShowTimeIdWithTicketType(showTimeId);
+        return inventories.stream()
+                .map(eventMapper::toTicketInventoryResponse)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<EventDto.TicketInventoryResponse> getShowTimeInventories(UUID showTimeId) {
+        if (!showTimeRepository.existsById(showTimeId)) {
+            throw new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy suất diễn");
+        }
+        List<ShowTimeTicketInventory> inventories = inventoryRepository.findByShowTimeIdWithTicketType(showTimeId);
+        return inventories.stream()
+                .map(eventMapper::toTicketInventoryResponse)
+                .toList();
+    }
+
     private EventDto.EventSummaryResponse enrichEventSummary(Event event) {
         EventDto.EventSummaryResponse summary = eventMapper.toEventSummaryResponse(event);
         BigDecimal minPrice = event.getTicketTypes().stream()

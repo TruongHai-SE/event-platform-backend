@@ -16,11 +16,13 @@ import org.springframework.web.bind.annotation.RestController;
 import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
+import vn.eventplatform.event.dto.EventDto;
 import vn.eventplatform.event.dto.InternalInventoryDto;
 import vn.eventplatform.event.service.InventoryInternalService;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -76,6 +78,19 @@ public class InternalEventController {
     ) {
         validateInternalSecretConstantTime(secret);
         return ResponseEntity.ok(ApiResponse.ok(inventoryInternalService.getEventSnapshot(eventId)));
+    }
+
+    @GetMapping("/inventory/showtimes/{showTimeId}")
+    @Operation(summary = "[Internal] Lấy danh sách tồn kho vé theo suất diễn")
+    public ResponseEntity<ApiResponse<List<EventDto.TicketInventoryResponse>>> getShowTimeInventories(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @PathVariable("showTimeId") UUID showTimeId
+    ) {
+        validateInternalSecretConstantTime(secret);
+        return ResponseEntity.ok(ApiResponse.ok(
+                "Lấy danh sách tồn kho vé thành công",
+                inventoryInternalService.getShowTimeInventories(showTimeId)
+        ));
     }
 
     private void validateInternalSecretConstantTime(String providedSecret) {
