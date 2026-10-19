@@ -140,4 +140,29 @@ public class EventServiceFallback implements EventServiceClient {
 
         return ApiResponse.ok(null);
     }
+
+    @Override
+    public ApiResponse<List<ShowTimeInventoryResponse>> getShowTimeInventories(String secret, UUID showTimeId) {
+        log.info("[EventServiceFallback] Lấy tồn kho cho showTimeId={}", showTimeId);
+        List<ShowTimeInventoryResponse> list = new ArrayList<>();
+        synchronized (this) {
+            for (Map.Entry<String, MockInventoryItem> entry : inventoryStore.entrySet()) {
+                if (entry.getKey().startsWith(showTimeId.toString() + ":")) {
+                    MockInventoryItem item = entry.getValue();
+                    list.add(ShowTimeInventoryResponse.builder()
+                            .id(UUID.randomUUID())
+                            .showTimeId(showTimeId)
+                            .ticketTypeId(item.ticketTypeId)
+                            .ticketTypeName(item.ticketTypeName)
+                            .price(item.price)
+                            .totalQuantity(item.totalQuantity)
+                            .reservedQuantity(item.reservedQuantity)
+                            .soldQuantity(item.soldQuantity)
+                            .availableQuantity(item.getAvailableQuantity())
+                            .build());
+                }
+            }
+        }
+        return ApiResponse.ok("Lấy danh sách tồn kho vé thành công", list);
+    }
 }

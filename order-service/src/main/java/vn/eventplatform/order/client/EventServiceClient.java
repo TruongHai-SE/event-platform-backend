@@ -23,4 +23,10 @@ public interface EventServiceClient {
             @RequestHeader("X-Internal-Secret") String secret,
             @RequestBody ReleaseInventoryRequest request
     );
+
+    @org.springframework.web.bind.annotation.GetMapping("/internal/v1/events/inventory/showtimes/{showTimeId}")
+    ApiResponse<java.util.List<vn.eventplatform.order.client.dto.ShowTimeInventoryResponse>> getShowTimeInventories(
+            @RequestHeader("X-Internal-Secret") String secret,
+            @org.springframework.web.bind.annotation.PathVariable("showTimeId") java.util.UUID showTimeId
+    );
 }
