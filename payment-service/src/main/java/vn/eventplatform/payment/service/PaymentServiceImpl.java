@@ -2,12 +2,16 @@ package vn.eventplatform.payment.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+import vn.eventplatform.common.messaging.event.PaymentFailedEventPayload;
 import vn.eventplatform.payment.client.OrderServiceClient;
 import vn.eventplatform.payment.client.dto.InternalOrderResponse;
 import vn.eventplatform.payment.client.dto.OrderMarkPaidRequest;
@@ -51,6 +55,13 @@ public class PaymentServiceImpl implements PaymentService {
     private final OrderServiceClient orderServiceClient;
     private final VnPayProperties vnPayProperties;
     private final SePayProperties sePayProperties;
+
+    @Autowired(required = false)
+    private CommonEventPublisher eventPublisher;
+
+    public void setEventPublisher(CommonEventPublisher eventPublisher) {
+        this.eventPublisher = eventPublisher;
+    }
 
     @Value("${security.internal.secret}")
     private String internalSecret;
@@ -215,6 +226,7 @@ public class PaymentServiceImpl implements PaymentService {
                 paymentRepository.save(paymentToUpdate);
                 result.setSuccess(false);
                 result.setMessage("Số tiền thanh toán VNPay không khớp với số tiền đơn hàng");
+                publishPaymentFailedEvent(paymentToUpdate, "Số tiền thanh toán VNPay không khớp với số tiền đơn hàng");
                 return result;
             }
 
@@ -249,6 +261,7 @@ public class PaymentServiceImpl implements PaymentService {
                 paymentToUpdate.setStatus(PaymentStatus.FAILED);
                 paymentToUpdate.setTransactionId(result.getTransactionId());
                 paymentRepository.save(paymentToUpdate);
+                publishPaymentFailedEvent(paymentToUpdate, result.getMessage() != null ? result.getMessage() : "Thanh toán VNPay thất bại");
             }
         }
 
@@ -317,6 +330,7 @@ public class PaymentServiceImpl implements PaymentService {
         if (request.getTransferAmount() != null && request.getTransferAmount().compareTo(paymentToUpdate.getAmount()) < 0) {
             log.warn("Số tiền chuyển khoản ({}) nhỏ hơn số tiền cần thanh toán ({}) cho paymentId={}",
                     request.getTransferAmount(), paymentToUpdate.getAmount(), paymentToUpdate.getId());
+            publishPaymentFailedEvent(paymentToUpdate, "Số tiền chuyển khoản SePay không đủ");
             return SepayWebhookResponse.builder()
                     .success(true)
                     .message("Số tiền chuyển khoản không đủ")
@@ -448,5 +462,31 @@ public class PaymentServiceImpl implements PaymentService {
         refundLogRepository.save(savedRefundLog);
 
         return refundLogMapper.toResponse(savedRefundLog);
+    }
+
+    private void publishPaymentFailedEvent(Payment payment, String reason) {
+        if (eventPublisher == null || payment == null) {
+            return;
+        }
+        try {
+            PaymentFailedEventPayload payload = PaymentFailedEventPayload.builder()
+                    .paymentId(payment.getId())
+                    .orderId(payment.getOrderId())
+                    .orderCode(payment.getOrderCode())
+                    .amount(payment.getAmount())
+                    .paymentMethod(payment.getMethod() != null ? payment.getMethod().name() : null)
+                    .transactionId(payment.getTransactionId())
+                    .failureReason(reason)
+                    .failedAt(Instant.now())
+                    .build();
+
+            eventPublisher.publish(
+                    EventPlatformMessagingConfig.RK_PAYMENT_ORDER_FAILED,
+                    EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_FAILED,
+                    payload
+            );
+        } catch (Exception e) {
+            log.error("Lỗi khi publish event payment.failed cho paymentId={}", payment.getId(), e);
+        }
     }
 }
