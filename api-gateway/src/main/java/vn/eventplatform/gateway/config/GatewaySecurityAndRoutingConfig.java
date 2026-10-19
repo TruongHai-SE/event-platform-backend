@@ -634,6 +634,8 @@ public class GatewaySecurityAndRoutingConfig {
                 if (path.equals("/api/v1/speaker-invitations/respond")
                         || PATH_MATCHER.match("/api/v1/speaker-invitations/respond/**", path)
                         || PATH_MATCHER.match("/api/v1/payments/webhooks/**", path)
+                        || path.equals("/api/v1/payments/sepay/webhook")
+                        || PATH_MATCHER.match("/api/v1/payments/sepay/webhook/**", path)
                         || path.equals("/api/v1/payments/vnpay-ipn")
                         || path.equals("/api/v1/payments/vnpay/callback")
                         || PATH_MATCHER.match("/api/v1/payments/vnpay/callback/**", path)) {

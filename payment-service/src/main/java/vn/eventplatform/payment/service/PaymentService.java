@@ -13,6 +13,8 @@ public interface PaymentService {
 
     PaymentInitResponse createPayment(CreatePaymentRequest request, String clientIp);
 
+    PaymentInitResponse createPayment(CreatePaymentRequest request, UUID currentUserId, boolean isAdminOrStaff, String clientIp);
+
     PaymentInitResponse retryPayment(InternalRetryPaymentRequest request);
 
     PaymentCallbackResult handleVnPayCallback(Map<String, String> allParams);
@@ -21,7 +23,13 @@ public interface PaymentService {
 
     PaymentResponse getPaymentById(UUID id);
 
+    PaymentResponse getPaymentById(UUID id, UUID currentUserId, boolean isAdminOrStaff);
+
     List<PaymentResponse> getPaymentsByOrderId(UUID orderId);
+
+    List<PaymentResponse> getPaymentsByOrderId(UUID orderId, UUID currentUserId, boolean isAdminOrStaff);
+
+    List<PaymentResponse> getPaymentsByOrderCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff);
 
     RefundResponse createRefund(CreateRefundRequest request);
 }

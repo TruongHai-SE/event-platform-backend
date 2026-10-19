@@ -27,7 +27,8 @@ public class SecurityConfiguration {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(
-                                "/api/v1/payments/**",
+                                "/api/v1/payments/vnpay/callback",
+                                "/api/v1/payments/sepay/webhook",
                                 "/internal/**",
                                 "/swagger-ui/**",
                                 "/v3/api-docs/**",
