@@ -30,6 +30,12 @@ import vn.eventplatform.order.lock.InventoryLockService;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
 import vn.eventplatform.order.dto.OrderFilterRequest;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+import vn.eventplatform.common.messaging.event.OrderCreatedEventPayload;
+import vn.eventplatform.common.messaging.event.OrderExpiredEventPayload;
+import vn.eventplatform.common.messaging.event.OrderItemEventPayload;
+import vn.eventplatform.common.messaging.event.OrderPaidEventPayload;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -52,6 +58,7 @@ public class OrderServiceImpl implements OrderService {
     private final PaymentServiceClient paymentServiceClient;
     private final InventoryLockService inventoryLockService;
     private final org.springframework.transaction.support.TransactionOperations transactionOperations;
+    private final CommonEventPublisher eventPublisher;
 
     @Value("${security.internal.secret}")
     private String internalSecret;
@@ -69,10 +76,11 @@ public class OrderServiceImpl implements OrderService {
             PromotionServiceClient promotionServiceClient,
             PaymentServiceClient paymentServiceClient,
             InventoryLockService inventoryLockService,
-            PlatformTransactionManager transactionManager
+            PlatformTransactionManager transactionManager,
+            @Autowired(required = false) CommonEventPublisher eventPublisher
     ) {
         this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient,
-                inventoryLockService, new TransactionTemplate(transactionManager));
+                inventoryLockService, new TransactionTemplate(transactionManager), eventPublisher);
     }
 
     public OrderServiceImpl(
@@ -84,7 +92,7 @@ public class OrderServiceImpl implements OrderService {
             PlatformTransactionManager transactionManager
     ) {
         this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, null,
-                inventoryLockService, new TransactionTemplate(transactionManager));
+                inventoryLockService, new TransactionTemplate(transactionManager), null);
     }
 
     public OrderServiceImpl(
@@ -96,7 +104,7 @@ public class OrderServiceImpl implements OrderService {
             org.springframework.transaction.support.TransactionOperations transactionOperations
     ) {
         this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, null,
-                inventoryLockService, transactionOperations);
+                inventoryLockService, transactionOperations, null);
     }
 
     public OrderServiceImpl(
@@ -108,6 +116,20 @@ public class OrderServiceImpl implements OrderService {
             InventoryLockService inventoryLockService,
             org.springframework.transaction.support.TransactionOperations transactionOperations
     ) {
+        this(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient,
+                inventoryLockService, transactionOperations, null);
+    }
+
+    public OrderServiceImpl(
+            OrderRepository orderRepository,
+            OrderMapper orderMapper,
+            EventServiceClient eventServiceClient,
+            PromotionServiceClient promotionServiceClient,
+            PaymentServiceClient paymentServiceClient,
+            InventoryLockService inventoryLockService,
+            org.springframework.transaction.support.TransactionOperations transactionOperations,
+            CommonEventPublisher eventPublisher
+    ) {
         this.orderRepository = orderRepository;
         this.orderMapper = orderMapper;
         this.eventServiceClient = eventServiceClient;
@@ -115,6 +137,7 @@ public class OrderServiceImpl implements OrderService {
         this.paymentServiceClient = paymentServiceClient;
         this.inventoryLockService = inventoryLockService;
         this.transactionOperations = transactionOperations;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -280,6 +303,8 @@ public class OrderServiceImpl implements OrderService {
                 log.error("Lỗi Feign khi gọi promotion-service applyVoucher cho orderCode={}", order.getOrderCode(), e);
             }
         }
+
+        publishOrderCreatedEvent(order);
 
         return orderMapper.toResponse(order);
     }
@@ -546,6 +571,7 @@ public class OrderServiceImpl implements OrderService {
                 releaseVoucherForOrder(order, "EXPIRED");
                 log.info("Đã chuyển trạng thái hết hạn, giải phóng tồn kho và voucher cho đơn hàng: orderCode={}, showTimeId={}",
                         order.getOrderCode(), order.getShowTimeId());
+                publishOrderExpiredEvent(order);
             } else {
                 log.debug("Đơn hàng {} không còn ở trạng thái PENDING hoặc đã được xử lý bởi luồng khác, bỏ qua expire",
                         order.getOrderCode());
@@ -722,6 +748,114 @@ public class OrderServiceImpl implements OrderService {
         Order savedOrder = orderRepository.save(order);
         log.info("Đơn hàng {} đã được cập nhật sang trạng thái PAID thành công", savedOrder.getOrderCode());
 
+        publishOrderPaidEvent(savedOrder, request);
+
         return orderMapper.toResponse(savedOrder);
+    }
+
+    private List<OrderItemEventPayload> toOrderItemPayloads(Order order) {
+        if (order.getItems() == null || order.getItems().isEmpty()) {
+            return List.of();
+        }
+        return order.getItems().stream()
+                .map(item -> OrderItemEventPayload.builder()
+                        .ticketTypeId(item.getTicketTypeId())
+                        .quantity(item.getQuantity())
+                        .unitPrice(item.getUnitPrice())
+                        .subtotal(item.getUnitPrice() != null && item.getQuantity() != null
+                                ? item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity()))
+                                : BigDecimal.ZERO)
+                        .build())
+                .toList();
+    }
+
+    private void publishOrderCreatedEvent(Order order) {
+        if (eventPublisher == null) {
+            return;
+        }
+        try {
+            OrderCreatedEventPayload payload = OrderCreatedEventPayload.builder()
+                    .orderId(order.getId())
+                    .orderCode(order.getOrderCode())
+                    .userId(order.getUserId())
+                    .eventId(order.getEventId())
+                    .showTimeId(order.getShowTimeId())
+                    .promotionId(order.getPromotionId())
+                    .subtotal(order.getSubtotal())
+                    .discountAmount(order.getDiscountAmount())
+                    .totalAmount(order.getTotalAmount())
+                    .status(order.getStatus() != null ? order.getStatus().name() : null)
+                    .expiresAt(order.getExpiresAt())
+                    .customerName(order.getCustomerName())
+                    .customerEmail(order.getCustomerEmail())
+                    .customerPhone(order.getCustomerPhone())
+                    .items(toOrderItemPayloads(order))
+                    .build();
+
+            eventPublisher.publish(
+                    EventPlatformMessagingConfig.RK_PAYMENT_ORDER_CREATED,
+                    EventPlatformMessagingConfig.EVENT_TYPE_ORDER_CREATED,
+                    payload
+            );
+        } catch (Exception e) {
+            log.error("Lỗi khi publish event order.created cho orderCode={}", order.getOrderCode(), e);
+        }
+    }
+
+    private void publishOrderPaidEvent(Order order, vn.eventplatform.order.dto.OrderMarkPaidRequest request) {
+        if (eventPublisher == null) {
+            return;
+        }
+        try {
+            OrderPaidEventPayload payload = OrderPaidEventPayload.builder()
+                    .orderId(order.getId())
+                    .orderCode(order.getOrderCode())
+                    .userId(order.getUserId())
+                    .eventId(order.getEventId())
+                    .showTimeId(order.getShowTimeId())
+                    .totalAmount(order.getTotalAmount())
+                    .paymentId(request != null ? request.getPaymentId() : null)
+                    .transactionId(request != null ? request.getTransactionId() : null)
+                    .paymentMethod(request != null ? request.getPaymentMethod() : null)
+                    .paidAt(request != null && request.getPaidAt() != null ? request.getPaidAt() : Instant.now())
+                    .customerName(order.getCustomerName())
+                    .customerEmail(order.getCustomerEmail())
+                    .items(toOrderItemPayloads(order))
+                    .build();
+
+            eventPublisher.publish(
+                    EventPlatformMessagingConfig.RK_PAYMENT_ORDER_PAID,
+                    EventPlatformMessagingConfig.EVENT_TYPE_ORDER_PAID,
+                    payload
+            );
+        } catch (Exception e) {
+            log.error("Lỗi khi publish event order.paid cho orderCode={}", order.getOrderCode(), e);
+        }
+    }
+
+    private void publishOrderExpiredEvent(Order order) {
+        if (eventPublisher == null) {
+            return;
+        }
+        try {
+            OrderExpiredEventPayload payload = OrderExpiredEventPayload.builder()
+                    .orderId(order.getId())
+                    .orderCode(order.getOrderCode())
+                    .userId(order.getUserId())
+                    .eventId(order.getEventId())
+                    .showTimeId(order.getShowTimeId())
+                    .expiredAt(Instant.now())
+                    .promotionId(order.getPromotionId())
+                    .releasedItems(toOrderItemPayloads(order))
+                    .build();
+
+            eventPublisher.publish(
+                    EventPlatformMessagingConfig.RK_PAYMENT_ORDER_EXPIRED,
+                    EventPlatformMessagingConfig.EVENT_TYPE_ORDER_EXPIRED,
+                    payload
+            );
+        } catch (Exception e) {
+            log.error("Lỗi khi publish event order.expired cho orderCode={}", order.getOrderCode(), e);
+        }
     }
 }

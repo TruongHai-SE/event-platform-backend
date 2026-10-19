@@ -37,6 +37,11 @@ import vn.eventplatform.order.dto.OrderFilterRequest;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.mapper.OrderMapper;
 import vn.eventplatform.order.repository.OrderRepository;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+import vn.eventplatform.common.messaging.event.OrderCreatedEventPayload;
+import vn.eventplatform.common.messaging.event.OrderExpiredEventPayload;
+import vn.eventplatform.common.messaging.event.OrderPaidEventPayload;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -72,6 +77,9 @@ class OrderServiceTest {
     @Mock
     private vn.eventplatform.order.lock.InventoryLockService inventoryLockService;
 
+    @Mock
+    private CommonEventPublisher eventPublisher;
+
     private final org.springframework.transaction.support.TransactionOperations transactionOperations =
             new org.springframework.transaction.support.TransactionOperations() {
                 @Override
@@ -98,7 +106,7 @@ class OrderServiceTest {
             return null;
         }).when(inventoryLockService).executeWithLock(any(), any(), any(Runnable.class));
 
-        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient, inventoryLockService, transactionOperations);
+        orderService = new OrderServiceImpl(orderRepository, orderMapper, eventServiceClient, promotionServiceClient, paymentServiceClient, inventoryLockService, transactionOperations, eventPublisher);
         ReflectionTestUtils.setField(orderService, "internalSecret", "test-internal-secret");
         lenient().when(orderRepository.updateOrderStatusIfMatch(any(), any(), any(), any())).thenReturn(1);
     }
@@ -1396,5 +1404,138 @@ class OrderServiceTest {
         assertThatThrownBy(() -> orderService.retryPayment(orderId, retryRequest, strangerId, false, "127.0.0.1"))
                 .isInstanceOf(AppException.class)
                 .satisfies(ex -> assertThat(((AppException) ex).getErrorCode()).isEqualTo(ErrorCode.ACCESS_DENIED));
+    }
+
+    @Test
+    @DisplayName("Publish event order.created khi tạo đơn hàng thành công")
+    void shouldPublishOrderCreatedEventWhenOrderIsCreated() {
+        UUID userId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        CreateOrderRequest request = CreateOrderRequest.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .customerName("Nguyen Van A")
+                .customerEmail("a@example.com")
+                .customerPhone("0901234567")
+                .items(List.of(CreateOrderItemRequest.builder().ticketTypeId(ticketTypeId).quantity(2).build()))
+                .build();
+
+        CheckAndReserveInventoryResponse inventoryRes = CheckAndReserveInventoryResponse.builder()
+                .success(true)
+                .reservedItems(List.of(TicketTypeInventoryDto.builder()
+                        .ticketTypeId(ticketTypeId)
+                        .ticketTypeName("VIP")
+                        .price(new BigDecimal("100000.00"))
+                        .maxPerOrder(10)
+                        .availableQuantity(20)
+                        .build()))
+                .build();
+        when(eventServiceClient.checkAndReserveInventory(any(), any())).thenReturn(ApiResponse.ok(inventoryRes));
+
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0);
+            o.setId(UUID.randomUUID());
+            return o;
+        });
+
+        orderService.createOrder(userId, request);
+
+        ArgumentCaptor<OrderCreatedEventPayload> payloadCaptor = ArgumentCaptor.forClass(OrderCreatedEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_CREATED),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_ORDER_CREATED),
+                payloadCaptor.capture()
+        );
+
+        OrderCreatedEventPayload publishedPayload = payloadCaptor.getValue();
+        assertThat(publishedPayload.getUserId()).isEqualTo(userId);
+        assertThat(publishedPayload.getEventId()).isEqualTo(eventId);
+        assertThat(publishedPayload.getCustomerEmail()).isEqualTo("a@example.com");
+        assertThat(publishedPayload.getItems()).hasSize(1);
+        assertThat(publishedPayload.getItems().get(0).getQuantity()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("Publish event order.paid khi cập nhật trạng thái PAID thành công")
+    void shouldPublishOrderPaidEventWhenOrderIsMarkedPaid() {
+        UUID orderId = UUID.randomUUID();
+        UUID paymentId = UUID.randomUUID();
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-PAID01")
+                .userId(UUID.randomUUID())
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("250000.00"))
+                .customerName("Tran Van B")
+                .customerEmail("b@example.com")
+                .build();
+
+        when(orderRepository.findById(orderId)).thenReturn(Optional.of(order));
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        vn.eventplatform.order.dto.OrderMarkPaidRequest request =
+                vn.eventplatform.order.dto.OrderMarkPaidRequest.builder()
+                        .paymentId(paymentId)
+                        .transactionId("VNP123456")
+                        .paymentMethod("VNPAY")
+                        .paidAt(Instant.now())
+                        .build();
+
+        orderService.markOrderPaid(orderId, request);
+
+        ArgumentCaptor<OrderPaidEventPayload> payloadCaptor = ArgumentCaptor.forClass(OrderPaidEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_PAID),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_ORDER_PAID),
+                payloadCaptor.capture()
+        );
+
+        OrderPaidEventPayload published = payloadCaptor.getValue();
+        assertThat(published.getOrderId()).isEqualTo(orderId);
+        assertThat(published.getPaymentId()).isEqualTo(paymentId);
+        assertThat(published.getTransactionId()).isEqualTo("VNP123456");
+        assertThat(published.getPaymentMethod()).isEqualTo("VNPAY");
+        assertThat(published.getTotalAmount()).isEqualByComparingTo("250000.00");
+    }
+
+    @Test
+    @DisplayName("Publish event order.expired khi đơn hàng hết hạn giữ chỗ")
+    void shouldPublishOrderExpiredEventWhenOrderExpires() {
+        UUID orderId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+        OrderItem item = OrderItem.builder()
+                .ticketTypeId(ticketTypeId)
+                .quantity(1)
+                .unitPrice(new BigDecimal("150000.00"))
+                .build();
+
+        Order order = Order.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261019-EXP01")
+                .userId(UUID.randomUUID())
+                .showTimeId(UUID.randomUUID())
+                .status(OrderStatus.PENDING)
+                .expiresAt(Instant.now().minusSeconds(10))
+                .items(new java.util.ArrayList<>(List.of(item)))
+                .build();
+
+        when(eventServiceClient.releaseInventory(any(), any())).thenReturn(ApiResponse.ok("Thành công", null));
+
+        orderService.expireOrder(order);
+
+        ArgumentCaptor<OrderExpiredEventPayload> payloadCaptor = ArgumentCaptor.forClass(OrderExpiredEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_EXPIRED),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_ORDER_EXPIRED),
+                payloadCaptor.capture()
+        );
+
+        OrderExpiredEventPayload published = payloadCaptor.getValue();
+        assertThat(published.getOrderId()).isEqualTo(orderId);
+        assertThat(published.getReleasedItems()).hasSize(1);
+        assertThat(published.getReleasedItems().get(0).getTicketTypeId()).isEqualTo(ticketTypeId);
     }
 }

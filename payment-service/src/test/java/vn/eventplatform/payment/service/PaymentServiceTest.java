@@ -40,6 +40,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.ArgumentCaptor;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+import vn.eventplatform.common.messaging.event.PaymentFailedEventPayload;
+import vn.eventplatform.payment.dto.sepay.SepayWebhookRequest;
+import vn.eventplatform.payment.dto.sepay.SepayWebhookResponse;
 
 @ExtendWith(MockitoExtension.class)
 class PaymentServiceTest {
@@ -71,6 +77,9 @@ class PaymentServiceTest {
     @Mock
     private PaymentStrategy paymentStrategy;
 
+    @Mock
+    private CommonEventPublisher eventPublisher;
+
     @InjectMocks
     private PaymentServiceImpl paymentService;
 
@@ -91,6 +100,7 @@ class PaymentServiceTest {
                 .build();
 
         ReflectionTestUtils.setField(paymentService, "internalSecret", "secret123");
+        paymentService.setEventPublisher(eventPublisher);
     }
 
     @Test
@@ -325,5 +335,129 @@ class PaymentServiceTest {
         assertThatThrownBy(() -> paymentService.retryPayment(retryRequest))
                 .isInstanceOf(AppException.class)
                 .hasMessageContaining("Đơn hàng đã hết thời gian giữ chỗ thanh toán");
+    }
+
+    @Test
+    @DisplayName("Publish event payment.failed khi callback VNPay trả về trạng thái thất bại")
+    void handleVnPayCallback_PublishesPaymentFailedEvent_WhenStatusFailed() {
+        Payment pendingPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        PaymentCallbackResult failedResult = PaymentCallbackResult.builder()
+                .success(false)
+                .orderCode("TKZ-20261018-001")
+                .transactionId("VNP_TXN_FAIL_01")
+                .message("Khách hàng hủy giao dịch")
+                .build();
+        when(paymentStrategy.verifyCallback(any())).thenReturn(failedResult);
+
+        when(paymentRepository.findByOrderCodeAndStatus("TKZ-20261018-001", PaymentStatus.PENDING))
+                .thenReturn(List.of(pendingPayment));
+
+        paymentService.handleVnPayCallback(Map.of("vnp_TxnRef", "TKZ-20261018-001"));
+
+        assertThat(pendingPayment.getStatus()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(pendingPayment.getTransactionId()).isEqualTo("VNP_TXN_FAIL_01");
+
+        ArgumentCaptor<PaymentFailedEventPayload> payloadCaptor = ArgumentCaptor.forClass(PaymentFailedEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_FAILED),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_FAILED),
+                payloadCaptor.capture()
+        );
+
+        PaymentFailedEventPayload published = payloadCaptor.getValue();
+        assertThat(published.getOrderId()).isEqualTo(orderId);
+        assertThat(published.getOrderCode()).isEqualTo("TKZ-20261018-001");
+        assertThat(published.getAmount()).isEqualByComparingTo("100000.00");
+        assertThat(published.getFailureReason()).isEqualTo("Khách hàng hủy giao dịch");
+    }
+
+    @Test
+    @DisplayName("Publish event payment.failed khi số tiền callback VNPay không khớp số tiền đơn hàng")
+    void handleVnPayCallback_PublishesPaymentFailedEvent_WhenAmountMismatch() {
+        Payment pendingPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        PaymentCallbackResult mismatchResult = PaymentCallbackResult.builder()
+                .success(true)
+                .orderCode("TKZ-20261018-001")
+                .amount(new BigDecimal("50000.00"))
+                .transactionId("VNP_TXN_MISMATCH_01")
+                .build();
+        when(paymentStrategy.verifyCallback(any())).thenReturn(mismatchResult);
+
+        when(paymentRepository.findByOrderCodeAndStatus("TKZ-20261018-001", PaymentStatus.PENDING))
+                .thenReturn(List.of(pendingPayment));
+
+        PaymentCallbackResult result = paymentService.handleVnPayCallback(Map.of("vnp_TxnRef", "TKZ-20261018-001"));
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(pendingPayment.getStatus()).isEqualTo(PaymentStatus.FAILED);
+
+        ArgumentCaptor<PaymentFailedEventPayload> payloadCaptor = ArgumentCaptor.forClass(PaymentFailedEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_FAILED),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_FAILED),
+                payloadCaptor.capture()
+        );
+
+        PaymentFailedEventPayload published = payloadCaptor.getValue();
+        assertThat(published.getOrderId()).isEqualTo(orderId);
+        assertThat(published.getFailureReason()).contains("Số tiền thanh toán VNPay không khớp");
+    }
+
+    @Test
+    @DisplayName("Publish event payment.failed khi số tiền SePay chuyển khoản không đủ")
+    void handleSepayWebhook_PublishesPaymentFailedEvent_WhenTransferAmountInsufficient() {
+        when(sePayProperties.validateApiKey("valid_key")).thenReturn(true);
+
+        Payment pendingPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("150000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.findByNormalizedOrderCodeAndStatus("TKZ20261018001", PaymentStatus.PENDING))
+                .thenReturn(List.of(pendingPayment));
+
+        SepayWebhookRequest webhookRequest = SepayWebhookRequest.builder()
+                .id(12345L)
+                .code("TKZ20261018001")
+                .transferAmount(new BigDecimal("100000.00"))
+                .build();
+
+        SepayWebhookResponse response = paymentService.handleSepayWebhook("valid_key", webhookRequest);
+
+        assertThat(response.isSuccess()).isTrue();
+        assertThat(response.getMessage()).contains("Số tiền chuyển khoản không đủ");
+
+        ArgumentCaptor<PaymentFailedEventPayload> payloadCaptor = ArgumentCaptor.forClass(PaymentFailedEventPayload.class);
+        verify(eventPublisher).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_FAILED),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_FAILED),
+                payloadCaptor.capture()
+        );
+
+        PaymentFailedEventPayload published = payloadCaptor.getValue();
+        assertThat(published.getOrderId()).isEqualTo(orderId);
+        assertThat(published.getFailureReason()).isEqualTo("Số tiền chuyển khoản SePay không đủ");
     }
 }
