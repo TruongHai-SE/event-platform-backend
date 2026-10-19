@@ -26,7 +26,7 @@ class PaymentDtoValidationTest {
     }
 
     @Test
-    @DisplayName("CreatePaymentRequest - Valid request passes validation")
+    @DisplayName("CreatePaymentRequest - Valid request with orderId passes validation")
     void createPaymentRequest_Valid_Passes() {
         CreatePaymentRequest request = CreatePaymentRequest.builder()
                 .orderId(UUID.randomUUID())
@@ -38,10 +38,23 @@ class PaymentDtoValidationTest {
     }
 
     @Test
-    @DisplayName("CreatePaymentRequest - Null orderId or method fails validation")
+    @DisplayName("CreatePaymentRequest - Valid request with orderCode passes validation")
+    void createPaymentRequest_WithOrderCode_Valid_Passes() {
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-20261019-001")
+                .method(PaymentGateway.SEPAY)
+                .build();
+
+        Set<ConstraintViolation<CreatePaymentRequest>> violations = validator.validate(request);
+        assertThat(violations).isEmpty();
+    }
+
+    @Test
+    @DisplayName("CreatePaymentRequest - Null orderId and orderCode fails validation")
     void createPaymentRequest_NullFields_Fails() {
         CreatePaymentRequest request = CreatePaymentRequest.builder()
                 .orderId(null)
+                .orderCode(null)
                 .method(null)
                 .build();
 

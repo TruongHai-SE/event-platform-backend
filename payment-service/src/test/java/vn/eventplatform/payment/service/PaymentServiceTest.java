@@ -460,4 +460,226 @@ class PaymentServiceTest {
         assertThat(published.getOrderId()).isEqualTo(orderId);
         assertThat(published.getFailureReason()).isEqualTo("Số tiền chuyển khoản SePay không đủ");
     }
+
+    @Test
+    @DisplayName("createPayment succeeds using orderCode and SePay gateway")
+    void createPayment_Success_WithOrderCode() {
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .build();
+
+        when(orderServiceClient.getOrderByCode(eq("secret123"), eq("TKZ-20261018-001")))
+                .thenReturn(ApiResponse.ok(internalOrder));
+
+        Payment savedPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .amount(new BigDecimal("100000.00"))
+                .method(PaymentGateway.SEPAY)
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.save(any(Payment.class))).thenReturn(savedPayment);
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.SEPAY)).thenReturn(paymentStrategy);
+
+        PaymentInitResult initResult = PaymentInitResult.builder()
+                .paymentId(savedPayment.getId())
+                .orderId(orderId)
+                .method(PaymentGateway.SEPAY)
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .build();
+
+        when(paymentStrategy.createPaymentUrl(any(PaymentContext.class))).thenReturn(initResult);
+
+        PaymentInitResponse expectedResponse = PaymentInitResponse.builder()
+                .paymentId(savedPayment.getId())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .paymentUrl("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .qrCode("https://qr.sepay.vn/img?des=TKZ20261018001")
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentMapper.toInitResponse(savedPayment, initResult)).thenReturn(expectedResponse);
+
+        PaymentInitResponse response = paymentService.createPayment(request, "127.0.0.1");
+
+        assertThat(response).isNotNull();
+        assertThat(response.getMethod()).isEqualTo(PaymentGateway.SEPAY);
+        assertThat(response.getQrCode()).contains("sepay");
+        verify(orderServiceClient).getOrderByCode("secret123", "TKZ-20261018-001");
+    }
+
+    @Test
+    @DisplayName("createPayment throws NOT_FOUND when order does not exist")
+    void createPayment_ThrowsNotFound_WhenOrderDoesNotExist() {
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-NON-EXISTENT")
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        when(orderServiceClient.getOrderByCode(eq("secret123"), eq("TKZ-NON-EXISTENT")))
+                .thenReturn(ApiResponse.error("404", "Order not found"));
+
+        assertThatThrownBy(() -> paymentService.createPayment(request, "127.0.0.1"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Không tìm thấy thông tin đơn hàng");
+    }
+
+    @Test
+    @DisplayName("createPayment throws BAD_REQUEST when order status is not PENDING")
+    void createPayment_ThrowsBadRequest_WhenOrderStatusNotPending() {
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        InternalOrderResponse paidOrder = InternalOrderResponse.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261018-001")
+                .status("PAID")
+                .build();
+
+        when(orderServiceClient.getOrderByCode(eq("secret123"), eq("TKZ-20261018-001")))
+                .thenReturn(ApiResponse.ok(paidOrder));
+
+        assertThatThrownBy(() -> paymentService.createPayment(request, "127.0.0.1"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng không ở trạng thái chờ thanh toán");
+    }
+
+    @Test
+    @DisplayName("createPayment throws BAD_REQUEST when order expired")
+    void createPayment_ThrowsBadRequest_WhenOrderExpired() {
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        InternalOrderResponse expiredOrder = InternalOrderResponse.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261018-001")
+                .status("PENDING")
+                .expiresAt(Instant.now().minusSeconds(100))
+                .build();
+
+        when(orderServiceClient.getOrderByCode(eq("secret123"), eq("TKZ-20261018-001")))
+                .thenReturn(ApiResponse.ok(expiredOrder));
+
+        assertThatThrownBy(() -> paymentService.createPayment(request, "127.0.0.1"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Đơn hàng đã hết thời gian giữ chỗ thanh toán");
+    }
+
+    @Test
+    @DisplayName("createPayment throws FORBIDDEN when user does not own order (IDOR defense)")
+    void createPayment_ThrowsForbidden_WhenIdorMismatch() {
+        UUID ownerId = UUID.randomUUID();
+        UUID attackerId = UUID.randomUUID();
+
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        InternalOrderResponse orderWithOwner = InternalOrderResponse.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261018-001")
+                .userId(ownerId)
+                .status("PENDING")
+                .expiresAt(Instant.now().plusSeconds(900))
+                .build();
+
+        when(orderServiceClient.getOrderByCode(eq("secret123"), eq("TKZ-20261018-001")))
+                .thenReturn(ApiResponse.ok(orderWithOwner));
+
+        assertThatThrownBy(() -> paymentService.createPayment(request, attackerId, false, "127.0.0.1"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Bạn không có quyền thao tác trên đơn hàng này");
+    }
+
+    @Test
+    @DisplayName("createPayment succeeds for ADMIN even if userId does not match owner")
+    void createPayment_SucceedsForAdmin_EvenIfUserIdDiffers() {
+        UUID ownerId = UUID.randomUUID();
+        UUID adminId = UUID.randomUUID();
+
+        CreatePaymentRequest request = CreatePaymentRequest.builder()
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        InternalOrderResponse orderWithOwner = InternalOrderResponse.builder()
+                .id(orderId)
+                .orderCode("TKZ-20261018-001")
+                .userId(ownerId)
+                .totalAmount(new BigDecimal("100000.00"))
+                .status("PENDING")
+                .expiresAt(Instant.now().plusSeconds(900))
+                .build();
+
+        when(orderServiceClient.getOrderByCode(eq("secret123"), eq("TKZ-20261018-001")))
+                .thenReturn(ApiResponse.ok(orderWithOwner));
+
+        Payment savedPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.save(any(Payment.class))).thenReturn(savedPayment);
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+
+        PaymentInitResult initResult = PaymentInitResult.builder()
+                .paymentId(savedPayment.getId())
+                .orderId(orderId)
+                .method(PaymentGateway.VNPAY)
+                .paymentUrl("https://sandbox.vnpayment.vn/pay")
+                .build();
+
+        when(paymentStrategy.createPaymentUrl(any(PaymentContext.class))).thenReturn(initResult);
+        when(paymentMapper.toInitResponse(any(), any())).thenReturn(PaymentInitResponse.builder()
+                .paymentId(savedPayment.getId())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .build());
+
+        PaymentInitResponse response = paymentService.createPayment(request, adminId, true, "127.0.0.1");
+
+        assertThat(response).isNotNull();
+        assertThat(response.getOrderId()).isEqualTo(orderId);
+    }
+
+    @Test
+    @DisplayName("getPaymentsByOrderCode returns mapped payments")
+    void getPaymentsByOrderCode_ReturnsList() {
+        String code = "TKZ-20261018-001";
+        Payment payment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode(code)
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.findByOrderCodeOrderByCreatedAtDesc(code))
+                .thenReturn(List.of(payment));
+        when(paymentMapper.toResponseList(List.of(payment)))
+                .thenReturn(List.of(vn.eventplatform.payment.dto.PaymentResponse.builder()
+                        .id(payment.getId())
+                        .orderCode(code)
+                        .status(PaymentStatus.PENDING)
+                        .build()));
+
+        List<vn.eventplatform.payment.dto.PaymentResponse> responses =
+                paymentService.getPaymentsByOrderCode(code, null, false);
+
+        assertThat(responses).hasSize(1);
+        assertThat(responses.get(0).getOrderCode()).isEqualTo(code);
+    }
 }

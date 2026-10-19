@@ -69,17 +69,21 @@ public class PaymentServiceImpl implements PaymentService {
     @Override
     @Transactional
     public PaymentInitResponse createPayment(CreatePaymentRequest request, String clientIp) {
-        log.info("Khởi tạo thanh toán cho orderId: {}, method: {}", request.getOrderId(), request.getMethod());
+        return createPayment(request, null, false, clientIp);
+    }
 
-        ApiResponse<InternalOrderResponse> orderResponse = orderServiceClient.getOrderById(internalSecret, request.getOrderId());
-        if (orderResponse == null || !orderResponse.isSuccess() || orderResponse.getData() == null) {
-            log.error("Không tìm thấy đơn hàng hoặc order-service lỗi: orderId={}", request.getOrderId());
-            throw new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy thông tin đơn hàng hoặc dịch vụ đơn hàng không phản hồi");
-        }
+    @Override
+    @Transactional
+    public PaymentInitResponse createPayment(CreatePaymentRequest request, UUID currentUserId, boolean isAdminOrStaff, String clientIp) {
+        log.info("Khởi tạo thanh toán: orderCode={}, orderId={}, method={}, userId={}",
+                request.getOrderCode(), request.getOrderId(), request.getMethod(), currentUserId);
 
-        InternalOrderResponse order = orderResponse.getData();
+        InternalOrderResponse order = fetchOrder(request);
+        validateOrderAccess(order, currentUserId, isAdminOrStaff);
+
         if (!"PENDING".equalsIgnoreCase(order.getStatus())) {
-            log.error("Đơn hàng không ở trạng thái PENDING: orderId={}, status={}", order.getId(), order.getStatus());
+            log.error("Đơn hàng không ở trạng thái PENDING: orderId={}, orderCode={}, status={}",
+                    order.getId(), order.getOrderCode(), order.getStatus());
             throw new AppException(ErrorCode.BAD_REQUEST, "Đơn hàng không ở trạng thái chờ thanh toán (PENDING)");
         }
 
@@ -93,6 +97,55 @@ public class PaymentServiceImpl implements PaymentService {
                 order.getCustomerEmail(),
                 clientIp
         );
+    }
+
+    private InternalOrderResponse fetchOrder(CreatePaymentRequest request) {
+        if (request == null) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Yêu cầu thanh toán không hợp lệ");
+        }
+
+        InternalOrderResponse order = null;
+        if (request.getOrderCode() != null && !request.getOrderCode().trim().isEmpty()) {
+            String trimmedCode = request.getOrderCode().trim();
+            try {
+                ApiResponse<InternalOrderResponse> orderResponse = orderServiceClient.getOrderByCode(internalSecret, trimmedCode);
+                if (orderResponse != null && orderResponse.isSuccess() && orderResponse.getData() != null) {
+                    order = orderResponse.getData();
+                }
+            } catch (Exception e) {
+                log.error("Lỗi Feign khi gọi order-service getOrderByCode: orderCode={}", trimmedCode, e);
+            }
+        }
+
+        if (order == null && request.getOrderId() != null) {
+            try {
+                ApiResponse<InternalOrderResponse> orderResponse = orderServiceClient.getOrderById(internalSecret, request.getOrderId());
+                if (orderResponse != null && orderResponse.isSuccess() && orderResponse.getData() != null) {
+                    order = orderResponse.getData();
+                }
+            } catch (Exception e) {
+                log.error("Lỗi Feign khi gọi order-service getOrderById: orderId={}", request.getOrderId(), e);
+            }
+        }
+
+        if (order == null) {
+            log.error("Không tìm thấy đơn hàng hoặc order-service lỗi: orderCode={}, orderId={}",
+                    request.getOrderCode(), request.getOrderId());
+            throw new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy thông tin đơn hàng hoặc dịch vụ đơn hàng không phản hồi");
+        }
+
+        return order;
+    }
+
+    private void validateOrderAccess(InternalOrderResponse order, UUID currentUserId, boolean isAdminOrStaff) {
+        if (currentUserId == null || isAdminOrStaff) {
+            return;
+        }
+        if (order.getUserId() != null && !order.getUserId().equals(currentUserId)) {
+            log.warn("IDOR Blocked: Người dùng userId={} không có quyền thao tác trên đơn hàng orderCode={}, ownerId={}",
+                    currentUserId, order.getOrderCode(), order.getUserId());
+            throw new AppException(ErrorCode.FORBIDDEN, "Bạn không có quyền thao tác trên đơn hàng này");
+        }
     }
 
     @Override
@@ -407,15 +460,58 @@ public class PaymentServiceImpl implements PaymentService {
     @Override
     @Transactional(readOnly = true)
     public PaymentResponse getPaymentById(UUID id) {
+        return getPaymentById(id, null, false);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public PaymentResponse getPaymentById(UUID id, UUID currentUserId, boolean isAdminOrStaff) {
         Payment payment = paymentRepository.findById(id)
                 .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy giao dịch thanh toán"));
+
+        if (currentUserId != null && !isAdminOrStaff) {
+            ApiResponse<InternalOrderResponse> orderResponse = orderServiceClient.getOrderById(internalSecret, payment.getOrderId());
+            if (orderResponse != null && orderResponse.isSuccess() && orderResponse.getData() != null) {
+                validateOrderAccess(orderResponse.getData(), currentUserId, isAdminOrStaff);
+            }
+        }
+
         return paymentMapper.toResponse(payment);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<PaymentResponse> getPaymentsByOrderId(UUID orderId) {
+        return getPaymentsByOrderId(orderId, null, false);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<PaymentResponse> getPaymentsByOrderId(UUID orderId, UUID currentUserId, boolean isAdminOrStaff) {
+        if (currentUserId != null && !isAdminOrStaff) {
+            ApiResponse<InternalOrderResponse> orderResponse = orderServiceClient.getOrderById(internalSecret, orderId);
+            if (orderResponse != null && orderResponse.isSuccess() && orderResponse.getData() != null) {
+                validateOrderAccess(orderResponse.getData(), currentUserId, isAdminOrStaff);
+            }
+        }
         List<Payment> payments = paymentRepository.findByOrderId(orderId);
+        return paymentMapper.toResponseList(payments);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<PaymentResponse> getPaymentsByOrderCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff) {
+        if (orderCode == null || orderCode.trim().isEmpty()) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Mã đơn hàng không được để trống");
+        }
+        String trimmedCode = orderCode.trim();
+        if (currentUserId != null && !isAdminOrStaff) {
+            ApiResponse<InternalOrderResponse> orderResponse = orderServiceClient.getOrderByCode(internalSecret, trimmedCode);
+            if (orderResponse != null && orderResponse.isSuccess() && orderResponse.getData() != null) {
+                validateOrderAccess(orderResponse.getData(), currentUserId, isAdminOrStaff);
+            }
+        }
+        List<Payment> payments = paymentRepository.findByOrderCodeOrderByCreatedAtDesc(trimmedCode);
         return paymentMapper.toResponseList(payments);
     }
 

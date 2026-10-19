@@ -8,6 +8,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import vn.eventplatform.common.dto.ApiResponse;
 import vn.eventplatform.payment.dto.*;
@@ -30,13 +32,17 @@ public class PaymentController {
     private final PaymentService paymentService;
 
     @PostMapping
-    @Operation(summary = "Khởi tạo thanh toán cho đơn hàng", description = "Tạo bản ghi payment PENDING và trả về URL/QR thanh toán tương ứng với cổng thanh toán (VNPAY, MOMO, SEPAY)")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Khởi tạo thanh toán cho đơn hàng", description = "Tạo bản ghi payment PENDING và trả về URL/QR thanh toán tương ứng với cổng thanh toán (VNPAY, SEPAY) dựa trên orderCode hoặc orderId")
     public ResponseEntity<ApiResponse<PaymentInitResponse>> createPayment(
             @Valid @RequestBody CreatePaymentRequest request,
+            Authentication authentication,
             HttpServletRequest httpServletRequest
     ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
         String clientIp = extractClientIp(httpServletRequest);
-        PaymentInitResponse response = paymentService.createPayment(request, clientIp);
+        PaymentInitResponse response = paymentService.createPayment(request, currentUserId, isAdminOrStaff, clientIp);
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(response));
     }
 
@@ -63,30 +69,71 @@ public class PaymentController {
     }
 
     @GetMapping("/{id}")
+    @PreAuthorize("isAuthenticated()")
     @Operation(summary = "Lấy chi tiết giao dịch thanh toán theo ID")
     public ResponseEntity<ApiResponse<PaymentResponse>> getPaymentById(
-            @PathVariable("id") UUID id
+            @PathVariable("id") UUID id,
+            Authentication authentication
     ) {
-        PaymentResponse response = paymentService.getPaymentById(id);
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        PaymentResponse response = paymentService.getPaymentById(id, currentUserId, isAdminOrStaff);
         return ResponseEntity.ok(ApiResponse.ok(response));
     }
 
     @GetMapping("/order/{orderId}")
-    @Operation(summary = "Lấy danh sách các giao dịch thanh toán của một đơn hàng")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Lấy danh sách các giao dịch thanh toán của một đơn hàng theo ID")
     public ResponseEntity<ApiResponse<List<PaymentResponse>>> getPaymentsByOrderId(
-            @PathVariable("orderId") UUID orderId
+            @PathVariable("orderId") UUID orderId,
+            Authentication authentication
     ) {
-        List<PaymentResponse> responses = paymentService.getPaymentsByOrderId(orderId);
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        List<PaymentResponse> responses = paymentService.getPaymentsByOrderId(orderId, currentUserId, isAdminOrStaff);
+        return ResponseEntity.ok(ApiResponse.ok(responses));
+    }
+
+    @GetMapping("/order-code/{orderCode}")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Lấy danh sách các giao dịch thanh toán của một đơn hàng theo mã đơn hàng")
+    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getPaymentsByOrderCode(
+            @PathVariable("orderCode") String orderCode,
+            Authentication authentication
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        List<PaymentResponse> responses = paymentService.getPaymentsByOrderCode(orderCode, currentUserId, isAdminOrStaff);
         return ResponseEntity.ok(ApiResponse.ok(responses));
     }
 
     @PostMapping("/refund")
+    @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
     @Operation(summary = "Tạo yêu cầu hoàn tiền cho giao dịch thanh toán")
     public ResponseEntity<ApiResponse<RefundResponse>> createRefund(
             @Valid @RequestBody CreateRefundRequest request
     ) {
         RefundResponse response = paymentService.createRefund(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(response));
+    }
+
+    private UUID extractUserId(Authentication authentication) {
+        if (authentication == null || authentication.getName() == null) {
+            return null;
+        }
+        try {
+            return UUID.fromString(authentication.getName());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private boolean checkAdminOrStaff(Authentication authentication) {
+        if (authentication == null || authentication.getAuthorities() == null) {
+            return false;
+        }
+        return authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN") || a.getAuthority().equals("ROLE_STAFF"));
     }
 
     private String extractClientIp(HttpServletRequest request) {
