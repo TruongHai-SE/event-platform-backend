@@ -38,6 +38,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
@@ -101,6 +103,8 @@ class PaymentServiceTest {
 
         ReflectionTestUtils.setField(paymentService, "internalSecret", "secret123");
         paymentService.setEventPublisher(eventPublisher);
+
+        lenient().when(paymentRepository.updatePaymentStatusIfMatch(any(), any(), any(), any(), any(), any())).thenReturn(1);
     }
 
     @Test
@@ -220,7 +224,7 @@ class PaymentServiceTest {
         assertThat(result.getMessage()).contains("Số tiền thanh toán VNPay không khớp");
         assertThat(existingPayment.getStatus()).isEqualTo(PaymentStatus.FAILED);
         assertThat(existingPayment.getTransactionId()).isEqualTo("VNP123456");
-        verify(paymentRepository).save(existingPayment);
+        verify(paymentRepository).updatePaymentStatusIfMatch(eq(existingPayment.getId()), eq(PaymentStatus.FAILED), eq(PaymentStatus.PENDING), eq("VNP123456"), any(), any());
     }
 
     @Test
@@ -682,4 +686,251 @@ class PaymentServiceTest {
         assertThat(responses).hasSize(1);
         assertThat(responses.get(0).getOrderCode()).isEqualTo(code);
     }
+
+    @Test
+    @DisplayName("handleVnPayCallback: Luồng winner thực hiện transition PENDING->SUCCESS và gọi markOrderPaid")
+    void handleVnPayCallback_Winner_Success_TransitionsToSuccessAndCallsOrderService() {
+        String orderCode = "TKZ-20261018-001";
+        Payment pendingPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        PaymentCallbackResult callbackResult = PaymentCallbackResult.builder()
+                .success(true)
+                .orderCode(orderCode)
+                .transactionId("VNP12345678")
+                .amount(new BigDecimal("100000.00"))
+                .payDate(Instant.now())
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.verifyCallback(any())).thenReturn(callbackResult);
+        when(paymentRepository.findByOrderCodeAndStatus(orderCode, PaymentStatus.PENDING))
+                .thenReturn(List.of(pendingPayment));
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(pendingPayment.getId()), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), eq("VNP12345678"), any(), any()))
+                .thenReturn(1);
+        when(orderServiceClient.markOrderPaid(eq("secret123"), eq(orderId), any()))
+                .thenReturn(ApiResponse.ok(internalOrder));
+
+        PaymentCallbackResult result = paymentService.handleVnPayCallback(Map.of("vnp_TxnRef", orderCode));
+
+        assertThat(result.isSuccess()).isTrue();
+        assertThat(pendingPayment.getStatus()).isEqualTo(PaymentStatus.SUCCESS);
+        assertThat(pendingPayment.getTransactionId()).isEqualTo("VNP12345678");
+        verify(paymentRepository).updatePaymentStatusIfMatch(
+                eq(pendingPayment.getId()), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), eq("VNP12345678"), any(), any());
+        verify(paymentRepository).cancelOtherPendingPayments(eq(orderId), eq(pendingPayment.getId()), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any());
+        verify(orderServiceClient).markOrderPaid(eq("secret123"), eq(orderId), any());
+    }
+
+    @Test
+    @DisplayName("handleVnPayCallback: Trả về idempotent ngay khi Payment đã ở trạng thái SUCCESS, không gọi markOrderPaid")
+    void handleVnPayCallback_Idempotent_WhenAlreadySuccess() {
+        String orderCode = "TKZ-20261018-001";
+        Payment successPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .transactionId("VNP12345678")
+                .build();
+
+        PaymentCallbackResult callbackResult = PaymentCallbackResult.builder()
+                .success(true)
+                .orderCode(orderCode)
+                .transactionId("VNP12345678")
+                .amount(new BigDecimal("100000.00"))
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.verifyCallback(any())).thenReturn(callbackResult);
+        when(paymentRepository.findByOrderCodeAndStatus(orderCode, PaymentStatus.PENDING))
+                .thenReturn(List.of());
+        when(paymentRepository.findByOrderCodeOrderByCreatedAtDesc(orderCode))
+                .thenReturn(List.of(successPayment));
+
+        PaymentCallbackResult result = paymentService.handleVnPayCallback(Map.of("vnp_TxnRef", orderCode));
+
+        assertThat(result.isSuccess()).isTrue();
+        verify(paymentRepository, never()).updatePaymentStatusIfMatch(any(), any(), any(), any(), any(), any());
+        verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("handleVnPayCallback: Luồng runner-up phát hiện luồng khác đã update SUCCESS thì trả về idempotent không lặp lại side-effects")
+    void handleVnPayCallback_RaceCondition_RunnerUpReturnsIdempotentResponse() {
+        String orderCode = "TKZ-20261018-001";
+        UUID paymentId = UUID.randomUUID();
+        Payment initialPendingPayment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        Payment reloadedSuccessPayment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode(orderCode)
+                .method(PaymentGateway.VNPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .transactionId("VNP12345678")
+                .build();
+
+        PaymentCallbackResult callbackResult = PaymentCallbackResult.builder()
+                .success(true)
+                .orderCode(orderCode)
+                .transactionId("VNP12345678")
+                .amount(new BigDecimal("100000.00"))
+                .build();
+
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.verifyCallback(any())).thenReturn(callbackResult);
+        when(paymentRepository.findByOrderCodeAndStatus(orderCode, PaymentStatus.PENDING))
+                .thenReturn(List.of(initialPendingPayment));
+        // Winner luồng khác đã update nên update trả về 0
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(paymentId), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), eq("VNP12345678"), any(), any()))
+                .thenReturn(0);
+        when(paymentRepository.findById(paymentId)).thenReturn(java.util.Optional.of(reloadedSuccessPayment));
+
+        PaymentCallbackResult result = paymentService.handleVnPayCallback(Map.of("vnp_TxnRef", orderCode));
+
+        assertThat(result.isSuccess()).isTrue();
+        verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("handleSepayWebhook: Luồng winner transition PENDING->SUCCESS và gọi markOrderPaid")
+    void handleSepayWebhook_Winner_Success_TransitionsToSuccessAndCallsOrderService() {
+        when(sePayProperties.validateApiKey("valid_key")).thenReturn(true);
+
+        Payment pendingPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        when(paymentRepository.findByNormalizedOrderCodeAndStatus("TKZ20261018001", PaymentStatus.PENDING))
+                .thenReturn(List.of(pendingPayment));
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(pendingPayment.getId()), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), any(), any(), any()))
+                .thenReturn(1);
+        when(orderServiceClient.markOrderPaid(eq("secret123"), eq(orderId), any()))
+                .thenReturn(ApiResponse.ok(internalOrder));
+
+        SepayWebhookRequest webhookRequest = SepayWebhookRequest.builder()
+                .id(99999L)
+                .code("TKZ20261018001")
+                .transferAmount(new BigDecimal("100000.00"))
+                .referenceCode("REF99999")
+                .build();
+
+        SepayWebhookResponse response = paymentService.handleSepayWebhook("valid_key", webhookRequest);
+
+        assertThat(response.isSuccess()).isTrue();
+        assertThat(response.getMessage()).contains("thành công");
+        assertThat(pendingPayment.getStatus()).isEqualTo(PaymentStatus.SUCCESS);
+        assertThat(pendingPayment.getTransactionId()).isEqualTo("REF99999");
+        verify(paymentRepository).updatePaymentStatusIfMatch(
+                eq(pendingPayment.getId()), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), eq("REF99999"), any(), any());
+        verify(paymentRepository).cancelOtherPendingPayments(eq(orderId), eq(pendingPayment.getId()), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any());
+        verify(orderServiceClient).markOrderPaid(eq("secret123"), eq(orderId), any());
+    }
+
+    @Test
+    @DisplayName("handleSepayWebhook: Trả về idempotent ngay khi Payment đã ở trạng thái SUCCESS, không gọi markOrderPaid")
+    void handleSepayWebhook_Idempotent_WhenAlreadySuccess() {
+        when(sePayProperties.validateApiKey("valid_key")).thenReturn(true);
+
+        Payment successPayment = Payment.builder()
+                .id(UUID.randomUUID())
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .transactionId("REF99999")
+                .build();
+
+        when(paymentRepository.findByNormalizedOrderCodeAndStatus("TKZ20261018001", PaymentStatus.PENDING))
+                .thenReturn(List.of());
+        when(paymentRepository.findByNormalizedOrderCode("TKZ20261018001"))
+                .thenReturn(List.of(successPayment));
+
+        SepayWebhookRequest webhookRequest = SepayWebhookRequest.builder()
+                .id(99999L)
+                .code("TKZ20261018001")
+                .transferAmount(new BigDecimal("100000.00"))
+                .referenceCode("REF99999")
+                .build();
+
+        SepayWebhookResponse response = paymentService.handleSepayWebhook("valid_key", webhookRequest);
+
+        assertThat(response.isSuccess()).isTrue();
+        assertThat(response.getMessage()).contains("trước đó");
+        verify(paymentRepository, never()).updatePaymentStatusIfMatch(any(), any(), any(), any(), any(), any());
+        verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("handleSepayWebhook: Luồng runner-up phát hiện luồng khác đã update SUCCESS thì trả về idempotent")
+    void handleSepayWebhook_RaceCondition_RunnerUpReturnsIdempotentResponse() {
+        when(sePayProperties.validateApiKey("valid_key")).thenReturn(true);
+
+        UUID paymentId = UUID.randomUUID();
+        Payment initialPendingPayment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.PENDING)
+                .build();
+
+        Payment reloadedSuccessPayment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .method(PaymentGateway.SEPAY)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .transactionId("REF99999")
+                .build();
+
+        when(paymentRepository.findByNormalizedOrderCodeAndStatus("TKZ20261018001", PaymentStatus.PENDING))
+                .thenReturn(List.of(initialPendingPayment));
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(paymentId), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), any(), any(), any()))
+                .thenReturn(0);
+        when(paymentRepository.findById(paymentId)).thenReturn(java.util.Optional.of(reloadedSuccessPayment));
+
+        SepayWebhookRequest webhookRequest = SepayWebhookRequest.builder()
+                .id(99999L)
+                .code("TKZ20261018001")
+                .transferAmount(new BigDecimal("100000.00"))
+                .referenceCode("REF99999")
+                .build();
+
+        SepayWebhookResponse response = paymentService.handleSepayWebhook("valid_key", webhookRequest);
+
+        assertThat(response.isSuccess()).isTrue();
+        assertThat(response.getMessage()).contains("trước đó");
+        verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
+    }
 }
+
