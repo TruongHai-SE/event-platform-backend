@@ -58,6 +58,16 @@ public class EventPlatformMessagingConfig {
     public static final String RK_TICKET_RESERVATION = "ticket.reservation.*";
     public static final String RK_TICKET_RESERVATION_DLQ = "dlq.ticket.reservation";
 
+    public static final String RK_PAYMENT_ORDER_CREATED = "payment.order.created";
+    public static final String RK_PAYMENT_ORDER_PAID = "payment.order.paid";
+    public static final String RK_PAYMENT_ORDER_EXPIRED = "payment.order.expired";
+    public static final String RK_PAYMENT_ORDER_FAILED = "payment.order.failed";
+
+    public static final String EVENT_TYPE_ORDER_CREATED = "order.created";
+    public static final String EVENT_TYPE_ORDER_PAID = "order.paid";
+    public static final String EVENT_TYPE_ORDER_EXPIRED = "order.expired";
+    public static final String EVENT_TYPE_PAYMENT_FAILED = "payment.failed";
+
     @Bean
     public TopicExchange eventPlatformExchange() {
         return ExchangeBuilder.topicExchange(MAIN_EXCHANGE).durable(true).build();

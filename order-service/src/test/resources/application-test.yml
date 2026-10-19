@@ -19,3 +19,7 @@ order:
   scheduler:
     enabled: false
 
+app:
+  messaging:
+    enabled: false
+
