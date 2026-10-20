@@ -150,6 +150,11 @@ public class EventPlatformMessagingConfig {
     }
 
     @Bean
+    public Binding ticketReservationOrderPaidBinding(Queue ticketReservationQueue, TopicExchange eventPlatformExchange) {
+        return BindingBuilder.bind(ticketReservationQueue).to(eventPlatformExchange).with(RK_PAYMENT_ORDER_PAID);
+    }
+
+    @Bean
     public Binding ticketReservationDlqBinding(Queue ticketReservationDlq, DirectExchange eventPlatformDeadLetterExchange) {
         return BindingBuilder.bind(ticketReservationDlq).to(eventPlatformDeadLetterExchange).with(RK_TICKET_RESERVATION_DLQ);
     }
@@ -222,6 +227,7 @@ public class EventPlatformMessagingConfig {
                     admin.declareBinding(paymentOrderDlqBinding(qPaymentDlq, dlxEx));
                     admin.declareBinding(ticketReservationBinding(qTicket, mainEx));
                     admin.declareBinding(ticketReservationPaymentSuccessBinding(qTicket, mainEx));
+                    admin.declareBinding(ticketReservationOrderPaidBinding(qTicket, mainEx));
                     admin.declareBinding(ticketReservationDlqBinding(qTicketDlq, dlxEx));
                     log.info("Initialized RabbitMQ topology: exchange={}, dlx={}", MAIN_EXCHANGE, DLX_EXCHANGE);
                 } catch (Exception ex) {

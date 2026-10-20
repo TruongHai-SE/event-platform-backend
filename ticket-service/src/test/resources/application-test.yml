@@ -14,3 +14,7 @@ security:
     secret-key: test_dummy_jwt_secret_key_for_unit_tests_must_be_256_bits_long_abcdef123456
   internal:
     secret: test_internal_secret_for_mock_verification
+
+app:
+  messaging:
+    enabled: false

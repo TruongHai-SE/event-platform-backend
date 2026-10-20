@@ -1,5 +1,6 @@
 package vn.eventplatform.ticket.service;
 
+import vn.eventplatform.common.messaging.event.OrderItemEventPayload;
 import vn.eventplatform.ticket.dto.CancelTicketsRequest;
 import vn.eventplatform.ticket.dto.CancelTicketsResponse;
 import vn.eventplatform.ticket.dto.IssueTicketRequest;
@@ -13,6 +14,8 @@ public interface TicketService {
     TicketResponse issueTicket(IssueTicketRequest request);
 
     List<TicketResponse> issueTickets(List<IssueTicketRequest> requests);
+
+    List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items);
 
     CancelTicketsResponse cancelTicketsByShowTimes(CancelTicketsRequest request);
 
