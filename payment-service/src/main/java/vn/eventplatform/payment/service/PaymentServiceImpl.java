@@ -11,8 +11,11 @@ import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
 import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+import vn.eventplatform.common.messaging.event.OrderItemEventPayload;
 import vn.eventplatform.common.messaging.event.PaymentFailedEventPayload;
+import vn.eventplatform.common.messaging.event.PaymentSuccessEventPayload;
 import vn.eventplatform.payment.client.OrderServiceClient;
+import vn.eventplatform.payment.client.dto.InternalOrderItemResponse;
 import vn.eventplatform.payment.client.dto.InternalOrderResponse;
 import vn.eventplatform.payment.client.dto.OrderMarkPaidRequest;
 import vn.eventplatform.payment.domain.*;
@@ -330,17 +333,32 @@ public class PaymentServiceImpl implements PaymentService {
                     .paidAt(paymentToUpdate.getPaidAt())
                     .build();
 
+            InternalOrderResponse orderData = null;
             try {
                 ApiResponse<InternalOrderResponse> orderUpdateRes = orderServiceClient.markOrderPaid(
                         internalSecret, paymentToUpdate.getOrderId(), markPaidRequest);
                 if (orderUpdateRes != null && orderUpdateRes.isSuccess()) {
                     log.info("Đã cập nhật trạng thái PAID cho đơn hàng: orderId={}", paymentToUpdate.getOrderId());
+                    orderData = orderUpdateRes.getData();
                 } else {
                     log.warn("Gọi order-service markOrderPaid trả về không thành công: {}", orderUpdateRes);
                 }
             } catch (Exception e) {
                 log.error("Lỗi Feign khi gọi order-service markOrderPaid cho orderId={}", paymentToUpdate.getOrderId(), e);
             }
+
+            if (orderData == null) {
+                try {
+                    ApiResponse<InternalOrderResponse> res = orderServiceClient.getOrderById(internalSecret, paymentToUpdate.getOrderId());
+                    if (res != null && res.isSuccess()) {
+                        orderData = res.getData();
+                    }
+                } catch (Exception e) {
+                    log.warn("Không thể lấy thông tin chi tiết đơn hàng orderId={}", paymentToUpdate.getOrderId(), e);
+                }
+            }
+
+            publishPaymentSuccessEvent(paymentToUpdate, orderData);
         } else {
             if (paymentToUpdate.getStatus() == PaymentStatus.PENDING
                     && (paymentToUpdate.getMethod() == null || paymentToUpdate.getMethod() == PaymentGateway.VNPAY)) {
@@ -478,17 +496,32 @@ public class PaymentServiceImpl implements PaymentService {
                 .paidAt(paymentToUpdate.getPaidAt())
                 .build();
 
+        InternalOrderResponse orderData = null;
         try {
             ApiResponse<InternalOrderResponse> orderUpdateRes = orderServiceClient.markOrderPaid(
                     internalSecret, paymentToUpdate.getOrderId(), markPaidRequest);
             if (orderUpdateRes != null && orderUpdateRes.isSuccess()) {
                 log.info("Đã cập nhật trạng thái PAID cho đơn hàng từ SePay: orderId={}", paymentToUpdate.getOrderId());
+                orderData = orderUpdateRes.getData();
             } else {
                 log.warn("Gọi order-service markOrderPaid từ SePay trả về không thành công: {}", orderUpdateRes);
             }
         } catch (Exception e) {
             log.error("Lỗi Feign khi gọi order-service markOrderPaid cho orderId={}", paymentToUpdate.getOrderId(), e);
         }
+
+        if (orderData == null) {
+            try {
+                ApiResponse<InternalOrderResponse> res = orderServiceClient.getOrderById(internalSecret, paymentToUpdate.getOrderId());
+                if (res != null && res.isSuccess()) {
+                    orderData = res.getData();
+                }
+            } catch (Exception e) {
+                log.warn("Không thể lấy thông tin chi tiết đơn hàng orderId={}", paymentToUpdate.getOrderId(), e);
+            }
+        }
+
+        publishPaymentSuccessEvent(paymentToUpdate, orderData);
 
         return SepayWebhookResponse.builder()
                 .success(true)
@@ -650,6 +683,50 @@ public class PaymentServiceImpl implements PaymentService {
             );
         } catch (Exception e) {
             log.error("Lỗi khi publish event payment.failed cho paymentId={}", payment.getId(), e);
+        }
+    }
+
+    private void publishPaymentSuccessEvent(Payment payment, InternalOrderResponse order) {
+        if (eventPublisher == null || payment == null) {
+            return;
+        }
+        try {
+            List<OrderItemEventPayload> itemPayloads = order != null && order.getItems() != null
+                    ? order.getItems().stream()
+                    .map(item -> OrderItemEventPayload.builder()
+                            .ticketTypeId(item.getTicketTypeId())
+                            .ticketTypeName(item.getTicketTypeName())
+                            .quantity(item.getQuantity())
+                            .unitPrice(item.getUnitPrice())
+                            .subtotal(item.getSubtotal())
+                            .build())
+                    .toList()
+                    : List.of();
+
+            PaymentSuccessEventPayload payload = PaymentSuccessEventPayload.builder()
+                    .paymentId(payment.getId())
+                    .orderId(payment.getOrderId())
+                    .orderCode(payment.getOrderCode() != null ? payment.getOrderCode() : (order != null ? order.getOrderCode() : null))
+                    .userId(order != null ? order.getUserId() : null)
+                    .eventId(order != null ? order.getEventId() : null)
+                    .showTimeId(order != null ? order.getShowTimeId() : null)
+                    .amount(payment.getAmount())
+                    .paymentMethod(payment.getMethod() != null ? payment.getMethod().name() : null)
+                    .transactionId(payment.getTransactionId())
+                    .paidAt(payment.getPaidAt() != null ? payment.getPaidAt() : Instant.now())
+                    .customerName(order != null ? order.getCustomerName() : null)
+                    .customerEmail(order != null ? order.getCustomerEmail() : null)
+                    .items(itemPayloads)
+                    .build();
+
+            eventPublisher.publish(
+                    EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS,
+                    EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_SUCCESS,
+                    payload
+            );
+            log.info("Đã publish event payment.success cho paymentId={}, orderId={}", payment.getId(), payment.getOrderId());
+        } catch (Exception e) {
+            log.error("Lỗi khi publish event payment.success cho paymentId={}", payment.getId(), e);
         }
     }
 }

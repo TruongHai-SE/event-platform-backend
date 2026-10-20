@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
+import vn.eventplatform.common.messaging.event.OrderItemEventPayload;
 import vn.eventplatform.ticket.domain.Ticket;
 import vn.eventplatform.ticket.domain.TicketStatus;
 import vn.eventplatform.ticket.dto.CancelTicketsRequest;
@@ -15,6 +16,7 @@ import vn.eventplatform.ticket.dto.TicketResponse;
 import vn.eventplatform.ticket.mapper.TicketMapper;
 import vn.eventplatform.ticket.repository.TicketRepository;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -44,6 +46,71 @@ public class TicketServiceImpl implements TicketService {
     @Transactional
     public List<TicketResponse> issueTickets(List<IssueTicketRequest> requests) {
         return requests.stream().map(this::issueTicket).toList();
+    }
+
+    @Override
+    @Transactional
+    public List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items) {
+        if (orderId == null) {
+            log.warn("Không thể phát hành vé: orderId là null");
+            return List.of();
+        }
+
+        if (items == null || items.isEmpty()) {
+            log.warn("Không thể phát hành vé: danh sách items của đơn hàng orderId={} là rỗng", orderId);
+            return List.of();
+        }
+
+        // Kiểm tra tính Idempotent ở mức Database: nếu vé của đơn hàng này đã được phát hành trước đó
+        if (ticketRepository.existsByOrderId(orderId)) {
+            log.info("Vé cho đơn hàng orderId={} ({}) đã được phát hành trước đó (idempotent), trả về danh sách vé hiện có",
+                    orderId, orderCode);
+            return getTicketsByOrderId(orderId);
+        }
+
+        List<Ticket> newTickets = new ArrayList<>();
+        for (OrderItemEventPayload item : items) {
+            int quantity = item.getQuantity() != null ? item.getQuantity() : 0;
+            UUID ticketTypeId = item.getTicketTypeId();
+
+            if (ticketTypeId == null || quantity <= 0) {
+                log.warn("Bỏ qua item không hợp lệ: ticketTypeId={}, quantity={}", ticketTypeId, quantity);
+                continue;
+            }
+
+            for (int i = 0; i < quantity; i++) {
+                String qrPayload = generateUniqueQrPayload(orderCode, orderId, ticketTypeId);
+                Ticket ticket = Ticket.builder()
+                        .orderId(orderId)
+                        .showTimeId(showTimeId)
+                        .ticketTypeId(ticketTypeId)
+                        .status(TicketStatus.SOLD)
+                        .qrPayload(qrPayload)
+                        .build();
+                newTickets.add(ticket);
+            }
+        }
+
+        if (newTickets.isEmpty()) {
+            log.warn("Không có vé hợp lệ nào được tạo cho orderId={}", orderId);
+            return List.of();
+        }
+
+        List<Ticket> savedTickets = ticketRepository.saveAll(newTickets);
+        log.info("Đã tự động phát hành thành công {} vé cho đơn hàng orderId={} (mã đơn: {})",
+                savedTickets.size(), orderId, orderCode);
+        return savedTickets.stream().map(ticketMapper::toResponse).toList();
+    }
+
+    private String generateUniqueQrPayload(String orderCode, UUID orderId, UUID ticketTypeId) {
+        String codePart = (orderCode != null && !orderCode.isBlank())
+                ? orderCode.trim()
+                : orderId.toString().substring(0, 8);
+        String qrPayload;
+        do {
+            qrPayload = "TKZ-QR-" + codePart + "-" + UUID.randomUUID().toString().replace("-", "");
+        } while (ticketRepository.existsByQrPayload(qrPayload));
+        return qrPayload;
     }
 
     @Override
