@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -17,10 +18,13 @@ public class InternalOrderResponse {
     private UUID id;
     private String orderCode;
     private UUID userId;
+    private UUID eventId;
+    private UUID showTimeId;
     private BigDecimal totalAmount;
     private String status;
     private String customerName;
     private String customerEmail;
     private String customerPhone;
     private Instant expiresAt;
+    private List<InternalOrderItemResponse> items;
 }

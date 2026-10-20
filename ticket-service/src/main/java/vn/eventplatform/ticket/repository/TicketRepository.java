@@ -18,6 +18,8 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     boolean existsByQrPayload(String qrPayload);
 
+    boolean existsByOrderId(UUID orderId);
+
     List<Ticket> findByOrderId(UUID orderId);
 
     List<Ticket> findByShowTimeId(UUID showTimeId);

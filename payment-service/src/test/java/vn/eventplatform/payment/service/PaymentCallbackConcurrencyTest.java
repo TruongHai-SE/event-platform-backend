@@ -32,6 +32,9 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -67,6 +70,9 @@ class PaymentCallbackConcurrencyTest {
     @Mock
     private PaymentStrategy paymentStrategy;
 
+    @Mock
+    private CommonEventPublisher eventPublisher;
+
     private PaymentServiceImpl paymentService;
 
     private UUID orderId;
@@ -88,6 +94,7 @@ class PaymentCallbackConcurrencyTest {
                 sePayProperties
         );
         ReflectionTestUtils.setField(paymentService, "internalSecret", "secret123");
+        paymentService.setEventPublisher(eventPublisher);
     }
 
     @Test
@@ -187,6 +194,11 @@ class PaymentCallbackConcurrencyTest {
         // Đảm bảo markOrderPaid chỉ được gọi đúng 1 lần duy nhất bởi luồng winner
         assertThat(markOrderPaidCallCount.get()).isEqualTo(1);
         assertThat(dbStatus.get()).isEqualTo(PaymentStatus.SUCCESS);
+        verify(eventPublisher, times(1)).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_SUCCESS),
+                any()
+        );
     }
 
     @Test
@@ -222,13 +234,13 @@ class PaymentCallbackConcurrencyTest {
 
         lenient().when(paymentRepository.findByNormalizedOrderCode(eq(normalizedCode)))
                 .thenAnswer(inv -> List.of(Payment.builder()
-                        .id(paymentId)
-                        .orderId(orderId)
-                        .orderCode(orderCode)
-                        .method(PaymentGateway.SEPAY)
-                        .amount(new BigDecimal("150000.00"))
-                        .status(dbStatus.get())
-                        .build()));
+                                .id(paymentId)
+                                .orderId(orderId)
+                                .orderCode(orderCode)
+                                .method(PaymentGateway.SEPAY)
+                                .amount(new BigDecimal("150000.00"))
+                                .status(dbStatus.get())
+                                .build()));
 
         when(paymentRepository.updatePaymentStatusIfMatch(
                 eq(paymentId), eq(PaymentStatus.SUCCESS), eq(PaymentStatus.PENDING), any(), any(), any()))
@@ -285,5 +297,10 @@ class PaymentCallbackConcurrencyTest {
         // Đảm bảo markOrderPaid chỉ được gọi đúng 1 lần duy nhất
         assertThat(markOrderPaidCallCount.get()).isEqualTo(1);
         assertThat(dbStatus.get()).isEqualTo(PaymentStatus.SUCCESS);
+        verify(eventPublisher, times(1)).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_SUCCESS),
+                any()
+        );
     }
 }

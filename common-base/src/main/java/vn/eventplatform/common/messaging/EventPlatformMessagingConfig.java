@@ -60,11 +60,13 @@ public class EventPlatformMessagingConfig {
 
     public static final String RK_PAYMENT_ORDER_CREATED = "payment.order.created";
     public static final String RK_PAYMENT_ORDER_PAID = "payment.order.paid";
+    public static final String RK_PAYMENT_ORDER_SUCCESS = "payment.order.success";
     public static final String RK_PAYMENT_ORDER_EXPIRED = "payment.order.expired";
     public static final String RK_PAYMENT_ORDER_FAILED = "payment.order.failed";
 
     public static final String EVENT_TYPE_ORDER_CREATED = "order.created";
     public static final String EVENT_TYPE_ORDER_PAID = "order.paid";
+    public static final String EVENT_TYPE_PAYMENT_SUCCESS = "payment.success";
     public static final String EVENT_TYPE_ORDER_EXPIRED = "order.expired";
     public static final String EVENT_TYPE_PAYMENT_FAILED = "payment.failed";
 
@@ -143,6 +145,16 @@ public class EventPlatformMessagingConfig {
     }
 
     @Bean
+    public Binding ticketReservationPaymentSuccessBinding(Queue ticketReservationQueue, TopicExchange eventPlatformExchange) {
+        return BindingBuilder.bind(ticketReservationQueue).to(eventPlatformExchange).with(RK_PAYMENT_ORDER_SUCCESS);
+    }
+
+    @Bean
+    public Binding ticketReservationOrderPaidBinding(Queue ticketReservationQueue, TopicExchange eventPlatformExchange) {
+        return BindingBuilder.bind(ticketReservationQueue).to(eventPlatformExchange).with(RK_PAYMENT_ORDER_PAID);
+    }
+
+    @Bean
     public Binding ticketReservationDlqBinding(Queue ticketReservationDlq, DirectExchange eventPlatformDeadLetterExchange) {
         return BindingBuilder.bind(ticketReservationDlq).to(eventPlatformDeadLetterExchange).with(RK_TICKET_RESERVATION_DLQ);
     }
@@ -214,6 +226,8 @@ public class EventPlatformMessagingConfig {
                     admin.declareBinding(paymentOrderBinding(qPayment, mainEx));
                     admin.declareBinding(paymentOrderDlqBinding(qPaymentDlq, dlxEx));
                     admin.declareBinding(ticketReservationBinding(qTicket, mainEx));
+                    admin.declareBinding(ticketReservationPaymentSuccessBinding(qTicket, mainEx));
+                    admin.declareBinding(ticketReservationOrderPaidBinding(qTicket, mainEx));
                     admin.declareBinding(ticketReservationDlqBinding(qTicketDlq, dlxEx));
                     log.info("Initialized RabbitMQ topology: exchange={}, dlx={}", MAIN_EXCHANGE, DLX_EXCHANGE);
                 } catch (Exception ex) {
