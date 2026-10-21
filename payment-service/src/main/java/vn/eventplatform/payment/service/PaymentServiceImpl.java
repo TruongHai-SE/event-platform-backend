@@ -660,6 +660,40 @@ public class PaymentServiceImpl implements PaymentService {
         return refundLogMapper.toResponse(savedRefundLog);
     }
 
+    @Override
+    @Transactional
+    public RefundResponse refundByOrder(InternalRefundOrderRequest request) {
+        if (request.getOrderId() == null) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Order ID không được để trống");
+        }
+        if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) < 0) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Số tiền hoàn không được âm");
+        }
+
+        if (request.getAmount().compareTo(BigDecimal.ZERO) == 0) {
+            return RefundResponse.builder()
+                    .orderId(request.getOrderId())
+                    .amount(BigDecimal.ZERO)
+                    .status(RefundStatus.SUCCESS)
+                    .reason(request.getReason())
+                    .build();
+        }
+
+        Payment payment = paymentRepository.findFirstByOrderIdAndStatusOrderByCreatedAtDesc(
+                request.getOrderId(), PaymentStatus.SUCCESS
+        ).orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND,
+                "Không tìm thấy giao dịch thanh toán thành công của đơn hàng: " + request.getOrderId()));
+
+        CreateRefundRequest refundReq = CreateRefundRequest.builder()
+                .paymentId(payment.getId())
+                .amount(request.getAmount())
+                .reason(request.getReason())
+                .idempotencyKey(request.getIdempotencyKey())
+                .build();
+
+        return createRefund(refundReq);
+    }
+
     private void publishPaymentFailedEvent(Payment payment, String reason) {
         if (eventPublisher == null || payment == null) {
             return;

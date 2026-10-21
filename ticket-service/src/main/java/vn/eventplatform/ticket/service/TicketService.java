@@ -26,4 +26,8 @@ public interface TicketService {
     TicketResponse getTicketByQr(String qrPayload);
 
     List<TicketResponse> getTicketsByOrderId(UUID orderId);
+
+    boolean hasUsedTickets(UUID orderId);
+
+    int cancelTicketsByOrderId(UUID orderId, String reason);
 }

@@ -15,6 +15,7 @@ import vn.eventplatform.ticket.dto.TicketResponse;
 import vn.eventplatform.ticket.service.TicketService;
 
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/internal/v1/tickets")
@@ -54,6 +55,27 @@ public class InternalTicketController {
         validateInternalSecret(secret);
         List<TicketResponse> data = ticketService.issueTickets(requests);
         return ResponseEntity.ok(ApiResponse.ok(data));
+    }
+
+    @GetMapping("/orders/{orderId}/has-used")
+    public ResponseEntity<ApiResponse<Boolean>> hasUsedTickets(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @PathVariable UUID orderId
+    ) {
+        validateInternalSecret(secret);
+        boolean hasUsed = ticketService.hasUsedTickets(orderId);
+        return ResponseEntity.ok(ApiResponse.ok(hasUsed));
+    }
+
+    @PostMapping("/orders/{orderId}/cancel")
+    public ResponseEntity<ApiResponse<Integer>> cancelTicketsByOrderId(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @PathVariable UUID orderId,
+            @RequestParam(value = "reason", required = false) String reason
+    ) {
+        validateInternalSecret(secret);
+        int count = ticketService.cancelTicketsByOrderId(orderId, reason != null ? reason : "Hoàn vé / hủy đơn");
+        return ResponseEntity.ok(ApiResponse.ok(count));
     }
 
     private void validateInternalSecret(String secret) {

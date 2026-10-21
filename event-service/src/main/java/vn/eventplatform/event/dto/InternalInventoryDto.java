@@ -115,6 +115,7 @@ public final class InternalInventoryDto {
         private String title;
         private EventStatus status;
         private RefundPolicy refundPolicy;
+        private Integer refundDeadlineDays;
         private Integer refundDeadlineHours;
         private BigDecimal refundFeePercent;
         private Instant nextShowTime;

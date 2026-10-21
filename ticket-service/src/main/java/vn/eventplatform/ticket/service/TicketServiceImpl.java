@@ -170,4 +170,19 @@ public class TicketServiceImpl implements TicketService {
         List<Ticket> tickets = ticketRepository.findByOrderIdWithCheckIn(orderId);
         return tickets.stream().map(ticketMapper::toResponse).toList();
     }
+
+    @Override
+    @Transactional(readOnly = true)
+    public boolean hasUsedTickets(UUID orderId) {
+        return ticketRepository.countByOrderIdAndStatus(orderId, TicketStatus.USED) > 0;
+    }
+
+    @Override
+    @Transactional
+    public int cancelTicketsByOrderId(UUID orderId, String reason) {
+        log.info("Hủy toàn bộ vé của đơn hàng orderId={}, lý do: {}", orderId, reason);
+        int count = ticketRepository.cancelTicketsByOrderId(orderId, TicketStatus.CANCELLED);
+        log.info("Đã hủy thành công {} vé của đơn hàng orderId={}", count, orderId);
+        return count;
+    }
 }

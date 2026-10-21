@@ -19,4 +19,19 @@ public class PaymentServiceFallback implements PaymentServiceClient {
                 request != null ? request.getMethod() : "null");
         throw new AppException(ErrorCode.INTERNAL_SERVER_ERROR, "Dịch vụ thanh toán hiện không khả dụng, vui lòng thử lại sau");
     }
+
+    @Override
+    public ApiResponse<vn.eventplatform.order.client.dto.RefundResponse> refundByOrder(
+            String secret, vn.eventplatform.order.client.dto.InternalRefundOrderRequest request) {
+        log.warn("[PaymentServiceFallback] Không thể kết nối tới payment-service để hoàn tiền: orderId={}, amount={}",
+                request != null ? request.getOrderId() : "null",
+                request != null ? request.getAmount() : "null");
+        // Fallback: return processing response
+        return ApiResponse.ok(vn.eventplatform.order.client.dto.RefundResponse.builder()
+                .orderId(request != null ? request.getOrderId() : null)
+                .amount(request != null ? request.getAmount() : java.math.BigDecimal.ZERO)
+                .status("PROCESSING")
+                .reason(request != null ? request.getReason() : null)
+                .build());
+    }
 }

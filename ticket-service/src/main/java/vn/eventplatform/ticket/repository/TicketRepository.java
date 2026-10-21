@@ -44,4 +44,10 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
     @org.springframework.data.jpa.repository.Modifying
     @Query("UPDATE Ticket t SET t.status = :newStatus WHERE t.showTimeId = :showTimeId AND t.status != :newStatus")
     int cancelTicketsByShowTimeId(@Param("showTimeId") UUID showTimeId, @Param("newStatus") TicketStatus newStatus);
+
+    long countByOrderIdAndStatus(UUID orderId, TicketStatus status);
+
+    @org.springframework.data.jpa.repository.Modifying
+    @Query("UPDATE Ticket t SET t.status = :newStatus WHERE t.orderId = :orderId AND t.status != :newStatus")
+    int cancelTicketsByOrderId(@Param("orderId") UUID orderId, @Param("newStatus") TicketStatus newStatus);
 }

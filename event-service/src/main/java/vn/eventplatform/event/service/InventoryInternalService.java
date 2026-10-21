@@ -154,6 +154,38 @@ public class InventoryInternalService {
     }
 
     @Transactional
+    public void releaseSoldInventory(InternalInventoryDto.ReleaseInventoryRequest request) {
+        Map<UUID, Integer> releaseQuantities = new TreeMap<>();
+        for (InternalInventoryDto.TicketItemReservationRequest item : request.getItems()) {
+            if (item.getQuantity() != null && item.getQuantity() > 0) {
+                releaseQuantities.merge(item.getTicketTypeId(), item.getQuantity(), Integer::sum);
+            }
+        }
+        if (releaseQuantities.isEmpty()) {
+            return;
+        }
+
+        List<ShowTimeTicketInventory> lockedInventories = inventoryRepository.findByShowTimeIdAndTicketTypeIdInForUpdate(
+                request.getShowTimeId(),
+                new ArrayList<>(releaseQuantities.keySet())
+        );
+
+        for (ShowTimeTicketInventory inv : lockedInventories) {
+            int releaseQty = releaseQuantities.getOrDefault(inv.getTicketType().getId(), 0);
+            if (releaseQty <= 0) {
+                continue;
+            }
+            int updatedRows = inventoryRepository.releaseSoldInventorySlot(inv.getId(), releaseQty);
+            if (updatedRows > 0) {
+                inv.setSoldQuantity(inv.getSoldQuantity() - releaseQty);
+            } else {
+                inv.setSoldQuantity(Math.max(0, inv.getSoldQuantity() - releaseQty));
+                inventoryRepository.save(inv);
+            }
+        }
+    }
+
+    @Transactional
     public void confirmInventory(InternalInventoryDto.ConfirmInventoryRequest request) {
         Map<UUID, Integer> confirmQuantities = new TreeMap<>();
         for (InternalInventoryDto.TicketItemReservationRequest item : request.getItems()) {
@@ -202,10 +234,18 @@ public class InventoryInternalService {
                 .title(event.getTitle())
                 .status(event.getStatus())
                 .refundPolicy(event.getRefundPolicy())
+                .refundDeadlineDays(event.getRefundDeadlineDays())
                 .refundDeadlineHours(event.getRefundDeadlineDays())
                 .refundFeePercent(event.getRefundFeePercentage())
                 .nextShowTime(nextShowTime)
                 .build();
+    }
+
+    @Transactional(readOnly = true)
+    public EventDto.ShowTimeResponse getShowTime(UUID showTimeId) {
+        ShowTime showTime = showTimeRepository.findById(showTimeId)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy suất diễn"));
+        return eventMapper.toShowTimeResponse(showTime);
     }
 
     @Transactional(readOnly = true)
