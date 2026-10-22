@@ -1000,5 +1000,85 @@ class PaymentServiceTest {
         verify(orderServiceClient, never()).markOrderPaid(any(), any(), any());
         verify(eventPublisher, never()).publish(eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_SUCCESS), any(), any());
     }
+
+    @Test
+    @DisplayName("cancelExpiredPendingPayments: Hủy thành công các payment PENDING quá 15 phút")
+    void cancelExpiredPendingPayments_Success() {
+        UUID paymentId1 = UUID.randomUUID();
+        UUID paymentId2 = UUID.randomUUID();
+
+        Payment p1 = Payment.builder()
+                .id(paymentId1)
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .status(PaymentStatus.PENDING)
+                .amount(new BigDecimal("100000.00"))
+                .build();
+
+        Payment p2 = Payment.builder()
+                .id(paymentId2)
+                .orderId(UUID.randomUUID())
+                .orderCode("TKZ-20261018-002")
+                .status(PaymentStatus.PENDING)
+                .amount(new BigDecimal("200000.00"))
+                .build();
+
+        when(paymentRepository.findByStatusAndCreatedAtBefore(eq(PaymentStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(p1, p2));
+
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(paymentId1), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any(), any(), any()))
+                .thenReturn(1);
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(paymentId2), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any(), any(), any()))
+                .thenReturn(1);
+
+        int cancelledCount = paymentService.cancelExpiredPendingPayments();
+
+        assertThat(cancelledCount).isEqualTo(2);
+        verify(eventPublisher, org.mockito.Mockito.times(2)).publish(
+                eq(EventPlatformMessagingConfig.RK_PAYMENT_ORDER_FAILED),
+                eq(EventPlatformMessagingConfig.EVENT_TYPE_PAYMENT_FAILED),
+                any(PaymentFailedEventPayload.class)
+        );
+    }
+
+    @Test
+    @DisplayName("cancelExpiredPendingPayments: Không có payment quá hạn trả về 0")
+    void cancelExpiredPendingPayments_NoExpiredPayments() {
+        when(paymentRepository.findByStatusAndCreatedAtBefore(eq(PaymentStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of());
+
+        int cancelledCount = paymentService.cancelExpiredPendingPayments();
+
+        assertThat(cancelledCount).isEqualTo(0);
+        verify(paymentRepository, never()).updatePaymentStatusIfMatch(any(), any(), any(), any(), any(), any());
+        verify(eventPublisher, never()).publish(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("cancelExpiredPendingPayments: Race condition khi hàng đã được cập nhật bởi luồng khác thì bỏ qua")
+    void cancelExpiredPendingPayments_RaceCondition_Ignored() {
+        UUID paymentId = UUID.randomUUID();
+        Payment p = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode("TKZ-20261018-001")
+                .status(PaymentStatus.PENDING)
+                .amount(new BigDecimal("100000.00"))
+                .build();
+
+        when(paymentRepository.findByStatusAndCreatedAtBefore(eq(PaymentStatus.PENDING), any(Instant.class)))
+                .thenReturn(List.of(p));
+
+        when(paymentRepository.updatePaymentStatusIfMatch(
+                eq(paymentId), eq(PaymentStatus.CANCELLED), eq(PaymentStatus.PENDING), any(), any(), any()))
+                .thenReturn(0);
+
+        int cancelledCount = paymentService.cancelExpiredPendingPayments();
+
+        assertThat(cancelledCount).isEqualTo(0);
+        verify(eventPublisher, never()).publish(any(), any(), any());
+    }
 }
 

@@ -43,6 +43,11 @@ payment:
     bank-name: ${SEPAY_BANK_NAME:MBBank}
     qr-template: ${SEPAY_QR_TEMPLATE:compact}
     qr-base-url: ${SEPAY_QR_BASE_URL:https://qr.sepay.vn/img}
+  scheduler:
+    enabled: ${PAYMENT_SCHEDULER_ENABLED:true}
+    expiration-check-interval-ms: ${PAYMENT_EXPIRATION_CHECK_INTERVAL_MS:30000}
+    expiration-initial-delay-ms: ${PAYMENT_EXPIRATION_INITIAL_DELAY_MS:10000}
+    expiration-threshold-minutes: ${PAYMENT_EXPIRATION_THRESHOLD_MINUTES:15}
 
 
 security:
