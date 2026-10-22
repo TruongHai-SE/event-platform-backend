@@ -31,6 +31,8 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID> {
 
     Optional<Payment> findFirstByOrderIdAndStatusOrderByCreatedAtDesc(UUID orderId, PaymentStatus status);
 
+    List<Payment> findByStatusAndCreatedAtBefore(PaymentStatus status, Instant threshold);
+
     @Query("SELECT p FROM Payment p WHERE p.orderCode = :orderCode AND p.status = :status ORDER BY p.createdAt DESC")
     List<Payment> findByOrderCodeAndStatus(@Param("orderCode") String orderCode, @Param("status") PaymentStatus status);
 

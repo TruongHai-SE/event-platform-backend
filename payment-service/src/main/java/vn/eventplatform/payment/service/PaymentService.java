@@ -32,4 +32,6 @@ public interface PaymentService {
     List<PaymentResponse> getPaymentsByOrderCode(String orderCode, UUID currentUserId, boolean isAdminOrStaff);
 
     RefundResponse createRefund(CreateRefundRequest request);
+
+    int cancelExpiredPendingPayments();
 }
