@@ -59,7 +59,7 @@ class TicketCancellationAndCheckInTest {
     @BeforeEach
     void setUp() {
         ticketService = new TicketServiceImpl(ticketRepository, ticketMapper, ticketQrPayloadService, qrCodeGeneratorService);
-        checkInService = new CheckInServiceImpl(ticketRepository, checkInRepository, checkInMapper);
+        checkInService = new CheckInServiceImpl(ticketRepository, checkInRepository, checkInMapper, ticketQrPayloadService);
     }
 
     @Test
@@ -203,5 +203,82 @@ class TicketCancellationAndCheckInTest {
 
         verify(ticketRepository).save(validTicket);
         verify(checkInRepository).save(savedCheckIn);
+    }
+
+    @Test
+    @DisplayName("Check-in thành công với mã QR JWT ký số hợp lệ: giải mã lấy ticketId và đổi status sang USED")
+    void shouldCheckInSuccessfullyWithSignedJwtQrPayload() {
+        UUID ticketId = UUID.randomUUID();
+        String jwtQrPayload = "header.payload.signature";
+        UUID staffId = UUID.randomUUID();
+
+        vn.eventplatform.ticket.dto.TicketQrPayloadDto payloadDto = vn.eventplatform.ticket.dto.TicketQrPayloadDto.builder()
+                .ticketId(ticketId)
+                .build();
+
+        Ticket validTicket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(jwtQrPayload)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        CheckIn savedCheckIn = CheckIn.builder()
+                .id(UUID.randomUUID())
+                .ticket(validTicket)
+                .staffId(staffId)
+                .method(CheckInMethod.QR_SCAN)
+                .checkedInAt(Instant.now())
+                .build();
+
+        CheckInResponse expectedResponse = CheckInResponse.builder()
+                .id(savedCheckIn.getId())
+                .ticketId(ticketId)
+                .staffId(staffId)
+                .method(CheckInMethod.QR_SCAN)
+                .build();
+
+        when(ticketQrPayloadService.verifyAndParsePayload(jwtQrPayload)).thenReturn(payloadDto);
+        when(ticketRepository.findByIdWithCheckIn(ticketId)).thenReturn(Optional.of(validTicket));
+        when(checkInRepository.existsByTicketId(ticketId)).thenReturn(false);
+        when(checkInMapper.toEntity(validTicket, staffId, CheckInMethod.QR_SCAN)).thenReturn(savedCheckIn);
+        when(checkInRepository.save(savedCheckIn)).thenReturn(savedCheckIn);
+        when(checkInMapper.toResponse(savedCheckIn)).thenReturn(expectedResponse);
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(jwtQrPayload)
+                .staffId(staffId)
+                .method(CheckInMethod.QR_SCAN)
+                .build();
+
+        CheckInResponse response = checkInService.processCheckIn(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTicketId()).isEqualTo(ticketId);
+        assertThat(validTicket.getStatus()).isEqualTo(TicketStatus.USED);
+
+        verify(ticketQrPayloadService).verifyAndParsePayload(jwtQrPayload);
+        verify(ticketRepository).save(validTicket);
+        verify(checkInRepository).save(savedCheckIn);
+    }
+
+    @Test
+    @DisplayName("Từ chối check-in khi mã QR JWT bị làm giả hoặc sai chữ ký số HMAC-SHA256")
+    void shouldRejectCheckInWhenJwtSignatureIsInvalid() {
+        String tamperedQr = "tampered.jwt.token";
+        UUID staffId = UUID.randomUUID();
+
+        when(ticketQrPayloadService.verifyAndParsePayload(tamperedQr))
+                .thenThrow(new AppException(vn.eventplatform.common.dto.ErrorCode.BAD_REQUEST, "Mã QR vé không hợp lệ hoặc đã bị can thiệp"));
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(tamperedQr)
+                .staffId(staffId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Mã QR vé không hợp lệ hoặc đã bị can thiệp");
+
+        verify(checkInRepository, never()).save(any());
     }
 }
