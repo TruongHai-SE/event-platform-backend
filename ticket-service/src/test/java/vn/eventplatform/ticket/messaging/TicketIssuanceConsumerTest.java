@@ -98,6 +98,7 @@ class TicketIssuanceConsumerTest {
 
         verify(ticketService, times(1)).issueTicketsForOrder(
                 eq(orderId),
+                eq(payload.getEventId()),
                 eq(showTimeId),
                 eq(orderCode),
                 argThat(list -> list.size() == 2 && list.get(0).getQuantity() == 2 && list.get(1).getQuantity() == 1)
@@ -143,6 +144,7 @@ class TicketIssuanceConsumerTest {
 
         verify(ticketService, times(1)).issueTicketsForOrder(
                 eq(orderId),
+                eq(payload.getEventId()),
                 eq(showTimeId),
                 eq(orderCode),
                 any()
@@ -182,6 +184,7 @@ class TicketIssuanceConsumerTest {
 
         verify(ticketService, times(1)).issueTicketsForOrder(
                 eq(orderId),
+                any(),
                 eq(showTimeId),
                 eq(orderCode),
                 argThat(list -> list.size() == 1 && list.get(0).getQuantity() == 3)
@@ -201,7 +204,7 @@ class TicketIssuanceConsumerTest {
 
         consumer.handleTicketReservationMessage(envelope);
 
-        verify(ticketService, never()).issueTicketsForOrder(any(), any(), any(), any());
+        verify(ticketService, never()).issueTicketsForOrder(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -243,7 +246,7 @@ class TicketIssuanceConsumerTest {
         consumer.handleTicketReservationMessage(envelope);
 
         // Đảm bảo ticketService chỉ được gọi đúng 1 lần duy nhất
-        verify(ticketService, times(1)).issueTicketsForOrder(eq(orderId), eq(showTimeId), any(), any());
+        verify(ticketService, times(1)).issueTicketsForOrder(eq(orderId), any(), eq(showTimeId), any(), any());
     }
 
     @Test
@@ -260,6 +263,6 @@ class TicketIssuanceConsumerTest {
         assertThatThrownBy(() -> consumer.handleTicketReservationMessage(poisonEnvelope))
                 .isInstanceOf(NonRetryableEventException.class);
 
-        verify(ticketService, never()).issueTicketsForOrder(any(), any(), any(), any());
+        verify(ticketService, never()).issueTicketsForOrder(any(), any(), any(), any(), any());
     }
 }
