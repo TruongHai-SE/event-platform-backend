@@ -11,6 +11,7 @@ import vn.eventplatform.ticket.domain.Ticket;
 import vn.eventplatform.ticket.domain.TicketStatus;
 import vn.eventplatform.ticket.dto.CheckInRequest;
 import vn.eventplatform.ticket.dto.CheckInResponse;
+import vn.eventplatform.ticket.dto.TicketQrPayloadDto;
 import vn.eventplatform.ticket.mapper.CheckInMapper;
 import vn.eventplatform.ticket.repository.CheckInRepository;
 import vn.eventplatform.ticket.repository.TicketRepository;
@@ -25,6 +26,7 @@ public class CheckInServiceImpl implements CheckInService {
     private final TicketRepository ticketRepository;
     private final CheckInRepository checkInRepository;
     private final CheckInMapper checkInMapper;
+    private final TicketQrPayloadService ticketQrPayloadService;
 
     @Override
     @Transactional
@@ -66,7 +68,14 @@ public class CheckInServiceImpl implements CheckInService {
 
     private Ticket findTicket(CheckInRequest request) {
         if (request.getQrPayload() != null && !request.getQrPayload().isBlank()) {
-            return ticketRepository.findByQrPayloadWithCheckIn(request.getQrPayload())
+            String qr = request.getQrPayload().trim();
+            // Nếu là chuỗi ký số JWT (3 phần phân tách bởi dấu chấm)
+            if (qr.contains(".") && qr.split("\\.").length == 3) {
+                TicketQrPayloadDto payload = ticketQrPayloadService.verifyAndParsePayload(qr);
+                return ticketRepository.findByIdWithCheckIn(payload.getTicketId())
+                        .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy thông tin vé từ mã QR"));
+            }
+            return ticketRepository.findByQrPayloadWithCheckIn(qr)
                     .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Mã QR không hợp lệ hoặc không tồn tại"));
         } else if (request.getTicketId() != null) {
             return ticketRepository.findByIdWithCheckIn(request.getTicketId())

@@ -1,6 +1,8 @@
 package vn.eventplatform.ticket.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -30,5 +32,19 @@ public class TicketController {
     public ResponseEntity<ApiResponse<List<TicketResponse>>> getTicketsByOrderId(@PathVariable("orderId") UUID orderId) {
         List<TicketResponse> data = ticketService.getTicketsByOrderId(orderId);
         return ResponseEntity.ok(ApiResponse.ok(data));
+    }
+
+    @GetMapping(value = "/{id}/qr-code", produces = MediaType.IMAGE_PNG_VALUE)
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<byte[]> getTicketQrImage(
+            @PathVariable("id") UUID id,
+            @RequestParam(name = "width", defaultValue = "300") int width,
+            @RequestParam(name = "height", defaultValue = "300") int height
+    ) {
+        byte[] imageBytes = ticketService.getTicketQrImage(id, width, height);
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_PNG)
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"ticket-qr-" + id + ".png\"")
+                .body(imageBytes);
     }
 }
