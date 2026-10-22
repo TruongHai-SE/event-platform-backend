@@ -47,12 +47,18 @@ class TicketCancellationAndCheckInTest {
     @Mock
     private CheckInMapper checkInMapper;
 
+    @Mock
+    private TicketQrPayloadService ticketQrPayloadService;
+
+    @Mock
+    private QrCodeGeneratorService qrCodeGeneratorService;
+
     private TicketServiceImpl ticketService;
     private CheckInServiceImpl checkInService;
 
     @BeforeEach
     void setUp() {
-        ticketService = new TicketServiceImpl(ticketRepository, ticketMapper);
+        ticketService = new TicketServiceImpl(ticketRepository, ticketMapper, ticketQrPayloadService, qrCodeGeneratorService);
         checkInService = new CheckInServiceImpl(ticketRepository, checkInRepository, checkInMapper);
     }
 
