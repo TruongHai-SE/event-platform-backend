@@ -38,6 +38,8 @@ app:
 security:
   token:
     secret-key: ${TOKEN_SECRET_KEY}
+  ticket:
+    qr-secret: ${TICKET_QR_SECRET:${TOKEN_SECRET_KEY}}
   internal:
     secret: ${INTERNAL_API_SECRET}
 

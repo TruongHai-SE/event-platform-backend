@@ -15,7 +15,11 @@ public interface TicketService {
 
     List<TicketResponse> issueTickets(List<IssueTicketRequest> requests);
 
-    List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items);
+    default List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items) {
+        return issueTicketsForOrder(orderId, null, showTimeId, orderCode, items);
+    }
+
+    List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID eventId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items);
 
     CancelTicketsResponse cancelTicketsByShowTimes(CancelTicketsRequest request);
 
@@ -26,4 +30,6 @@ public interface TicketService {
     TicketResponse getTicketByQr(String qrPayload);
 
     List<TicketResponse> getTicketsByOrderId(UUID orderId);
+
+    byte[] getTicketQrImage(UUID ticketId, int width, int height);
 }

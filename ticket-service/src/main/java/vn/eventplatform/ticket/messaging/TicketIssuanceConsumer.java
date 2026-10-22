@@ -54,6 +54,7 @@ public class TicketIssuanceConsumer {
                         payload.getOrderId(), payload.getOrderCode());
                 ticketService.issueTicketsForOrder(
                         payload.getOrderId(),
+                        payload.getEventId(),
                         payload.getShowTimeId(),
                         payload.getOrderCode(),
                         payload.getItems()
@@ -66,6 +67,7 @@ public class TicketIssuanceConsumer {
                         payload.getOrderId(), payload.getOrderCode());
                 ticketService.issueTicketsForOrder(
                         payload.getOrderId(),
+                        payload.getEventId(),
                         payload.getShowTimeId(),
                         payload.getOrderCode(),
                         payload.getItems()

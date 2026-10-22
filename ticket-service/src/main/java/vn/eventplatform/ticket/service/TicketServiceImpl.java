@@ -12,10 +12,12 @@ import vn.eventplatform.ticket.domain.TicketStatus;
 import vn.eventplatform.ticket.dto.CancelTicketsRequest;
 import vn.eventplatform.ticket.dto.CancelTicketsResponse;
 import vn.eventplatform.ticket.dto.IssueTicketRequest;
+import vn.eventplatform.ticket.dto.TicketQrPayloadDto;
 import vn.eventplatform.ticket.dto.TicketResponse;
 import vn.eventplatform.ticket.mapper.TicketMapper;
 import vn.eventplatform.ticket.repository.TicketRepository;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -27,15 +29,35 @@ public class TicketServiceImpl implements TicketService {
 
     private final TicketRepository ticketRepository;
     private final TicketMapper ticketMapper;
+    private final TicketQrPayloadService ticketQrPayloadService;
+    private final QrCodeGeneratorService qrCodeGeneratorService;
 
     @Override
     @Transactional
     public TicketResponse issueTicket(IssueTicketRequest request) {
-        if (ticketRepository.existsByQrPayload(request.getQrPayload())) {
-            throw new AppException(ErrorCode.BAD_REQUEST, "Mã QR của vé đã tồn tại trong hệ thống");
+        if (request.getQrPayload() != null && !request.getQrPayload().isBlank()) {
+            if (ticketRepository.existsByQrPayload(request.getQrPayload())) {
+                throw new AppException(ErrorCode.BAD_REQUEST, "Mã QR của vé đã tồn tại trong hệ thống");
+            }
         }
 
         Ticket ticket = ticketMapper.toEntity(request);
+        if (ticket.getId() == null) {
+            ticket.setId(UUID.randomUUID());
+        }
+
+        if (ticket.getQrPayload() == null || ticket.getQrPayload().isBlank()) {
+            TicketQrPayloadDto payloadDto = TicketQrPayloadDto.builder()
+                    .ticketId(ticket.getId())
+                    .showTimeId(ticket.getShowTimeId())
+                    .ticketTypeId(ticket.getTicketTypeId())
+                    .orderId(ticket.getOrderId())
+                    .seatNumber(ticket.getSeatNumber())
+                    .issuedAt(Instant.now())
+                    .build();
+            ticket.setQrPayload(ticketQrPayloadService.generatePayload(payloadDto));
+        }
+
         ticket = ticketRepository.save(ticket);
         log.info("Đã phát hành vé thành công: id={}, orderId={}, showTimeId={}",
                 ticket.getId(), ticket.getOrderId(), ticket.getShowTimeId());
@@ -50,7 +72,7 @@ public class TicketServiceImpl implements TicketService {
 
     @Override
     @Transactional
-    public List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items) {
+    public List<TicketResponse> issueTicketsForOrder(UUID orderId, UUID eventId, UUID showTimeId, String orderCode, List<OrderItemEventPayload> items) {
         if (orderId == null) {
             log.warn("Không thể phát hành vé: orderId là null");
             return List.of();
@@ -79,8 +101,21 @@ public class TicketServiceImpl implements TicketService {
             }
 
             for (int i = 0; i < quantity; i++) {
-                String qrPayload = generateUniqueQrPayload(orderCode, orderId, ticketTypeId);
+                UUID ticketId = UUID.randomUUID();
+                TicketQrPayloadDto payloadDto = TicketQrPayloadDto.builder()
+                        .ticketId(ticketId)
+                        .eventId(eventId)
+                        .showTimeId(showTimeId)
+                        .ticketTypeId(ticketTypeId)
+                        .ticketTypeName(item.getTicketTypeName())
+                        .orderId(orderId)
+                        .seatNumber(null)
+                        .issuedAt(Instant.now())
+                        .build();
+
+                String qrPayload = ticketQrPayloadService.generatePayload(payloadDto);
                 Ticket ticket = Ticket.builder()
+                        .id(ticketId)
                         .orderId(orderId)
                         .showTimeId(showTimeId)
                         .ticketTypeId(ticketTypeId)
@@ -169,5 +204,13 @@ public class TicketServiceImpl implements TicketService {
     public List<TicketResponse> getTicketsByOrderId(UUID orderId) {
         List<Ticket> tickets = ticketRepository.findByOrderIdWithCheckIn(orderId);
         return tickets.stream().map(ticketMapper::toResponse).toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public byte[] getTicketQrImage(UUID ticketId, int width, int height) {
+        Ticket ticket = ticketRepository.findById(ticketId)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy thông tin vé"));
+        return qrCodeGeneratorService.generateQrPng(ticket.getQrPayload(), width, height);
     }
 }
