@@ -57,7 +57,8 @@ public class TicketIssuanceConsumer {
                         payload.getEventId(),
                         payload.getShowTimeId(),
                         payload.getOrderCode(),
-                        payload.getItems()
+                        payload.getItems(),
+                        payload.getUserId()
                 );
             }
         } else if (EventPlatformMessagingConfig.EVENT_TYPE_ORDER_PAID.equalsIgnoreCase(eventType)) {
@@ -70,7 +71,8 @@ public class TicketIssuanceConsumer {
                         payload.getEventId(),
                         payload.getShowTimeId(),
                         payload.getOrderCode(),
-                        payload.getItems()
+                        payload.getItems(),
+                        payload.getUserId()
                 );
             }
         } else {

@@ -1,6 +1,11 @@
 package vn.eventplatform.ticket.repository;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -12,7 +17,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Repository
-public interface TicketRepository extends JpaRepository<Ticket, UUID> {
+public interface TicketRepository extends JpaRepository<Ticket, UUID>, JpaSpecificationExecutor<Ticket> {
 
     Optional<Ticket> findByQrPayload(String qrPayload);
 
@@ -21,6 +26,8 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
     boolean existsByOrderId(UUID orderId);
 
     List<Ticket> findByOrderId(UUID orderId);
+
+    List<Ticket> findByUserId(UUID userId);
 
     List<Ticket> findByShowTimeId(UUID showTimeId);
 
@@ -34,6 +41,12 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     @Query("SELECT t FROM Ticket t LEFT JOIN FETCH t.checkIn WHERE t.orderId = :orderId")
     List<Ticket> findByOrderIdWithCheckIn(@Param("orderId") UUID orderId);
+
+    @Query("SELECT t FROM Ticket t LEFT JOIN FETCH t.checkIn WHERE t.userId = :userId ORDER BY t.createdAt DESC")
+    List<Ticket> findByUserIdWithCheckIn(@Param("userId") UUID userId);
+
+    @EntityGraph(attributePaths = {"checkIn"})
+    Page<Ticket> findAll(Specification<Ticket> spec, Pageable pageable);
 
     List<Ticket> findByShowTimeIdIn(List<UUID> showTimeIds);
 
