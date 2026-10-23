@@ -42,6 +42,9 @@ class TicketControllerTest {
     private TicketService ticketService;
 
     @MockBean
+    private vn.eventplatform.ticket.service.TicketStatisticsSseService ticketStatisticsSseService;
+
+    @MockBean
     private TokenVerificationFilter tokenVerificationFilter;
 
     @BeforeEach
@@ -253,6 +256,27 @@ class TicketControllerTest {
     @DisplayName("GET /api/v1/tickets/statistics - Khách hàng thường (role USER) bị chặn 403 khi xem báo cáo")
     void testGetStatistics_User_Forbidden() throws Exception {
         mockMvc.perform(get("/api/v1/tickets/statistics"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = "ORGANIZER")
+    @DisplayName("GET /api/v1/tickets/statistics/stream - Ban tổ chức kết nối SSE stream thành công")
+    void testStreamTicketStatistics_Organizer_Success() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        when(ticketStatisticsSseService.subscribe(eventId, null))
+                .thenReturn(new org.springframework.web.servlet.mvc.method.annotation.SseEmitter());
+
+        mockMvc.perform(get("/api/v1/tickets/statistics/stream")
+                        .param("eventId", eventId.toString()))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    @DisplayName("GET /api/v1/tickets/statistics/stream - Người dùng thường bị chặn 403 khi kết nối stream")
+    void testStreamTicketStatistics_User_Forbidden() throws Exception {
+        mockMvc.perform(get("/api/v1/tickets/statistics/stream"))
                 .andExpect(status().isForbidden());
     }
 }
