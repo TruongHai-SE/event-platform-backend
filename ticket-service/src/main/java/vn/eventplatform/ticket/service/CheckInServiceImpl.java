@@ -15,10 +15,12 @@ import vn.eventplatform.ticket.dto.CheckInRequest;
 import vn.eventplatform.ticket.dto.CheckInResponse;
 import vn.eventplatform.ticket.dto.TicketQrPayloadDto;
 import vn.eventplatform.ticket.dto.TicketResponse;
+import vn.eventplatform.ticket.event.TicketCheckedInEvent;
 import vn.eventplatform.ticket.mapper.CheckInMapper;
 import vn.eventplatform.ticket.mapper.TicketMapper;
 import vn.eventplatform.ticket.repository.CheckInRepository;
 import vn.eventplatform.ticket.repository.TicketRepository;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.util.UUID;
 
@@ -32,6 +34,7 @@ public class CheckInServiceImpl implements CheckInService {
     private final TicketQrPayloadService ticketQrPayloadService;
     private final TicketMapper ticketMapper;
     private final OrderServiceClient orderServiceClient;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Value("${internal.secret:internal-secret-token}")
     private String internalSecret = "internal-secret-token";
@@ -41,20 +44,22 @@ public class CheckInServiceImpl implements CheckInService {
                               CheckInMapper checkInMapper,
                               TicketQrPayloadService ticketQrPayloadService,
                               @Autowired(required = false) TicketMapper ticketMapper,
-                              @Autowired(required = false) OrderServiceClient orderServiceClient) {
+                              @Autowired(required = false) OrderServiceClient orderServiceClient,
+                              @Autowired(required = false) ApplicationEventPublisher eventPublisher) {
         this.ticketRepository = ticketRepository;
         this.checkInRepository = checkInRepository;
         this.checkInMapper = checkInMapper;
         this.ticketQrPayloadService = ticketQrPayloadService;
         this.ticketMapper = ticketMapper;
         this.orderServiceClient = orderServiceClient;
+        this.eventPublisher = eventPublisher;
     }
 
     public CheckInServiceImpl(TicketRepository ticketRepository,
                               CheckInRepository checkInRepository,
                               CheckInMapper checkInMapper,
                               TicketQrPayloadService ticketQrPayloadService) {
-        this(ticketRepository, checkInRepository, checkInMapper, ticketQrPayloadService, null, null);
+        this(ticketRepository, checkInRepository, checkInMapper, ticketQrPayloadService, null, null, null);
     }
 
     @Override
@@ -83,6 +88,17 @@ public class CheckInServiceImpl implements CheckInService {
 
         log.info("Check-in thành công: ticketId={}, staffId={}, method={}, eventId={}, showTimeId={}",
                 ticket.getId(), request.getStaffId(), request.getMethod(), ticket.getEventId(), ticket.getShowTimeId());
+
+        if (eventPublisher != null) {
+            eventPublisher.publishEvent(new TicketCheckedInEvent(
+                    ticket.getEventId(),
+                    ticket.getShowTimeId(),
+                    ticket.getId(),
+                    request.getStaffId(),
+                    checkIn.getCheckedInAt()
+            ));
+        }
+
         return checkInMapper.toResponse(checkIn);
     }
 

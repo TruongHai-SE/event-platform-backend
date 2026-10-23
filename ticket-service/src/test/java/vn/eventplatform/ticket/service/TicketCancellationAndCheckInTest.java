@@ -53,13 +53,16 @@ class TicketCancellationAndCheckInTest {
     @Mock
     private QrCodeGeneratorService qrCodeGeneratorService;
 
+    @Mock
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     private TicketServiceImpl ticketService;
     private CheckInServiceImpl checkInService;
 
     @BeforeEach
     void setUp() {
         ticketService = new TicketServiceImpl(ticketRepository, ticketMapper, ticketQrPayloadService, qrCodeGeneratorService);
-        checkInService = new CheckInServiceImpl(ticketRepository, checkInRepository, checkInMapper, ticketQrPayloadService);
+        checkInService = new CheckInServiceImpl(ticketRepository, checkInRepository, checkInMapper, ticketQrPayloadService, null, null, eventPublisher);
     }
 
     @Test
