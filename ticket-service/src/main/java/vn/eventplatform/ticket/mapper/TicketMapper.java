@@ -11,6 +11,7 @@ import vn.eventplatform.ticket.dto.TicketResponse;
 public interface TicketMapper {
 
     @Mapping(target = "checkIn", source = "checkIn")
+    @Mapping(target = "qrImageUrl", expression = "java(ticket.getId() != null ? \"/api/v1/tickets/\" + ticket.getId() + \"/qr-code\" : null)")
     TicketResponse toResponse(Ticket ticket);
 
     @Mapping(target = "id", ignore = true)

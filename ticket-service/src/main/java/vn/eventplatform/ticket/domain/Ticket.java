@@ -10,6 +10,8 @@ import java.util.UUID;
 @Table(
     name = "tickets",
     indexes = {
+        @Index(name = "idx_tickets_user_id", columnList = "user_id"),
+        @Index(name = "idx_tickets_event_id", columnList = "event_id"),
         @Index(name = "idx_tickets_order_id", columnList = "order_id"),
         @Index(name = "idx_tickets_show_time_id", columnList = "show_time_id"),
         @Index(name = "uq_tickets_qr_payload", columnList = "qr_payload", unique = true)
@@ -26,8 +28,17 @@ public class Ticket extends BaseAuditableEntity {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
+    @Column(name = "user_id")
+    private UUID userId;
+
+    @Column(name = "event_id")
+    private UUID eventId;
+
     @Column(name = "ticket_type_id", nullable = false)
     private UUID ticketTypeId;
+
+    @Column(name = "ticket_type_name", length = 100)
+    private String ticketTypeName;
 
     @Column(name = "show_time_id", nullable = false)
     private UUID showTimeId;
