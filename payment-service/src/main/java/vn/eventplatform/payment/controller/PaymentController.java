@@ -117,6 +117,25 @@ public class PaymentController {
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(response));
     }
 
+    @PostMapping("/refunds/{refundLogId}/confirm")
+    @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
+    @Operation(summary = "Xác nhận hoàn tiền thủ công qua ngân hàng (chuyển MANUAL_BANK/PROCESSING sang SUCCESS)")
+    public ResponseEntity<ApiResponse<RefundResponse>> confirmManualRefund(
+            @PathVariable UUID refundLogId,
+            @Valid @RequestBody ConfirmManualRefundRequest request
+    ) {
+        RefundResponse response = paymentService.confirmManualRefund(refundLogId, request);
+        return ResponseEntity.ok(ApiResponse.ok("Xác nhận hoàn tiền thủ công thành công", response));
+    }
+
+    @GetMapping("/refunds/payment/{paymentId}")
+    @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
+    @Operation(summary = "Xem lịch sử hoàn tiền của giao dịch thanh toán")
+    public ResponseEntity<ApiResponse<List<RefundResponse>>> getRefundsByPaymentId(@PathVariable UUID paymentId) {
+        List<RefundResponse> responses = paymentService.getRefundsByPaymentId(paymentId);
+        return ResponseEntity.ok(ApiResponse.ok(responses));
+    }
+
     private UUID extractUserId(Authentication authentication) {
         if (authentication == null || authentication.getName() == null) {
             return null;

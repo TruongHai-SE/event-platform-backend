@@ -38,6 +38,18 @@ public class InternalPaymentController {
         return ResponseEntity.ok(ApiResponse.ok("Khởi tạo lại liên kết thanh toán thành công", response));
     }
 
+    @PostMapping("/refund")
+    public ResponseEntity<ApiResponse<vn.eventplatform.payment.dto.RefundResponse>> refundByOrder(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @Valid @RequestBody vn.eventplatform.payment.dto.InternalRefundOrderRequest request
+    ) {
+        validateInternalSecret(secret);
+        log.info("Nhận yêu cầu hoàn tiền đơn hàng qua internal API: orderId={}, amount={}, reason={}",
+                request.getOrderId(), request.getAmount(), request.getReason());
+        vn.eventplatform.payment.dto.RefundResponse response = paymentService.refundByOrder(request);
+        return ResponseEntity.ok(ApiResponse.ok("Xử lý yêu cầu hoàn tiền thành công", response));
+    }
+
     private void validateInternalSecret(String secret) {
         if (secret == null || !secret.equals(internalSecret)) {
             log.warn("Gọi InternalPaymentController với secret không hợp lệ!");

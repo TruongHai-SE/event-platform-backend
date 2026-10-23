@@ -31,6 +31,7 @@ app:
     enabled: ${APP_MESSAGING_ENABLED:true}
 
 payment:
+  mock-refund: ${PAYMENT_MOCK_REFUND:true}
   vnpay:
     tmn-code: ${VNPAY_TMN_CODE:DEMOVNPAY}
     hash-secret: ${VNPAY_HASH_SECRET:DEMOHASHSECRETKEY}

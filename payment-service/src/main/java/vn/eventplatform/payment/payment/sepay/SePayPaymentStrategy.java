@@ -72,7 +72,7 @@ public class SePayPaymentStrategy implements PaymentStrategy {
         return RefundResult.builder()
                 .success(false)
                 .refundLogId(context.getRefundLogId())
-                .status(RefundStatus.PROCESSING)
+                .status(RefundStatus.MANUAL_BANK)
                 .message("Hệ thống đã ghi nhận yêu cầu hoàn tiền SePay. Vui lòng thực hiện hoàn tiền thủ công qua tài khoản ngân hàng")
                 .refundedAmount(context.getAmount())
                 .refundedAt(null)

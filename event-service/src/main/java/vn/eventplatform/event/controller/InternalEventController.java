@@ -59,6 +59,17 @@ public class InternalEventController {
         return ResponseEntity.ok(ApiResponse.ok("Đã giải phóng tồn kho vé giữ chỗ", null));
     }
 
+    @PostMapping("/inventory/release-sold")
+    @Operation(summary = "[Internal] Giải phóng tồn kho vé đã bán về kho khả dụng khi hoàn vé")
+    public ResponseEntity<ApiResponse<Void>> releaseSoldInventory(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @Valid @RequestBody InternalInventoryDto.ReleaseInventoryRequest request
+    ) {
+        validateInternalSecretConstantTime(secret);
+        inventoryInternalService.releaseSoldInventory(request);
+        return ResponseEntity.ok(ApiResponse.ok("Đã hoàn lại số lượng vé vào kho", null));
+    }
+
     @PostMapping("/inventory/confirm")
     @Operation(summary = "[Internal] Xác nhận chuyển tồn kho từ giữ chỗ (reserved) sang đã bán (sold)")
     public ResponseEntity<ApiResponse<Void>> confirmInventory(
@@ -90,6 +101,19 @@ public class InternalEventController {
         return ResponseEntity.ok(ApiResponse.ok(
                 "Lấy danh sách tồn kho vé thành công",
                 inventoryInternalService.getShowTimeInventories(showTimeId)
+        ));
+    }
+
+    @GetMapping("/showtimes/{showTimeId}")
+    @Operation(summary = "[Internal] Lấy thông tin chi tiết một suất diễn")
+    public ResponseEntity<ApiResponse<EventDto.ShowTimeResponse>> getShowTime(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @PathVariable("showTimeId") UUID showTimeId
+    ) {
+        validateInternalSecretConstantTime(secret);
+        return ResponseEntity.ok(ApiResponse.ok(
+                "Lấy thông tin suất diễn thành công",
+                inventoryInternalService.getShowTime(showTimeId)
         ));
     }
 

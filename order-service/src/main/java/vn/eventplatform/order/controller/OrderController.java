@@ -25,6 +25,8 @@ import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderFilterRequest;
 import vn.eventplatform.order.dto.OrderPaymentInitResponse;
+import vn.eventplatform.order.dto.OrderRefundRequest;
+import vn.eventplatform.order.dto.OrderRefundResponse;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.dto.RetryPaymentRequest;
 import vn.eventplatform.order.service.OrderService;
@@ -167,6 +169,34 @@ public class OrderController {
         boolean isAdminOrStaff = checkAdminOrStaff(authentication);
         OrderResponse response = orderService.cancelOrderByCode(orderCode, currentUserId, isAdminOrStaff);
         return ResponseEntity.ok(ApiResponse.ok("Hủy đơn hàng thành công, tồn kho vé đã được giải phóng", response));
+    }
+
+    @PostMapping("/{id}/refund")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Yêu cầu hoàn vé và hoàn tiền đơn hàng đã thanh toán (theo ID)")
+    public ResponseEntity<ApiResponse<OrderRefundResponse>> requestRefund(
+            @PathVariable("id") UUID id,
+            @RequestBody(required = false) OrderRefundRequest request,
+            Authentication authentication
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        OrderRefundResponse response = orderService.requestRefund(id, request, currentUserId, isAdminOrStaff);
+        return ResponseEntity.ok(ApiResponse.ok("Yêu cầu hoàn tiền thành công", response));
+    }
+
+    @PostMapping("/code/{orderCode}/refund")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Yêu cầu hoàn vé và hoàn tiền đơn hàng đã thanh toán (theo mã đơn hàng)")
+    public ResponseEntity<ApiResponse<OrderRefundResponse>> requestRefundByCode(
+            @PathVariable("orderCode") String orderCode,
+            @RequestBody(required = false) OrderRefundRequest request,
+            Authentication authentication
+    ) {
+        UUID currentUserId = extractUserId(authentication);
+        boolean isAdminOrStaff = checkAdminOrStaff(authentication);
+        OrderRefundResponse response = orderService.requestRefundByCode(orderCode, request, currentUserId, isAdminOrStaff);
+        return ResponseEntity.ok(ApiResponse.ok("Yêu cầu hoàn tiền thành công", response));
     }
 
     @PostMapping("/{id}/retry-payment")

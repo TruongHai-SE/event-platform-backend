@@ -15,6 +15,7 @@ import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.order.client.EventServiceClient;
 import vn.eventplatform.order.client.PaymentServiceClient;
 import vn.eventplatform.order.client.PromotionServiceClient;
+import vn.eventplatform.order.client.TicketServiceClient;
 import vn.eventplatform.order.client.dto.*;
 import vn.eventplatform.order.domain.Order;
 import vn.eventplatform.order.domain.OrderItem;
@@ -23,6 +24,8 @@ import vn.eventplatform.order.dto.CreateOrderItemRequest;
 import vn.eventplatform.order.dto.CreateOrderRequest;
 import vn.eventplatform.order.dto.OrderCountdownResponse;
 import vn.eventplatform.order.dto.OrderPaymentInitResponse;
+import vn.eventplatform.order.dto.OrderRefundRequest;
+import vn.eventplatform.order.dto.OrderRefundResponse;
 import vn.eventplatform.order.dto.OrderResponse;
 import vn.eventplatform.order.dto.RetryPaymentRequest;
 import org.springframework.data.jpa.domain.Specification;
@@ -32,6 +35,7 @@ import vn.eventplatform.order.repository.OrderRepository;
 import vn.eventplatform.order.dto.OrderFilterRequest;
 import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
 import vn.eventplatform.common.messaging.EventPlatformMessagingConfig.CommonEventPublisher;
+import vn.eventplatform.common.messaging.event.EventCancelledEventPayload;
 import vn.eventplatform.common.messaging.event.OrderCreatedEventPayload;
 import vn.eventplatform.common.messaging.event.OrderExpiredEventPayload;
 import vn.eventplatform.common.messaging.event.OrderItemEventPayload;
@@ -59,6 +63,9 @@ public class OrderServiceImpl implements OrderService {
     private final InventoryLockService inventoryLockService;
     private final org.springframework.transaction.support.TransactionOperations transactionOperations;
     private final CommonEventPublisher eventPublisher;
+
+    @Autowired(required = false)
+    private TicketServiceClient ticketServiceClient;
 
     @Value("${security.internal.secret}")
     private String internalSecret;
@@ -138,6 +145,32 @@ public class OrderServiceImpl implements OrderService {
         this.inventoryLockService = inventoryLockService;
         this.transactionOperations = transactionOperations;
         this.eventPublisher = eventPublisher;
+    }
+
+    public OrderServiceImpl(
+            OrderRepository orderRepository,
+            OrderMapper orderMapper,
+            EventServiceClient eventServiceClient,
+            PromotionServiceClient promotionServiceClient,
+            PaymentServiceClient paymentServiceClient,
+            TicketServiceClient ticketServiceClient,
+            InventoryLockService inventoryLockService,
+            org.springframework.transaction.support.TransactionOperations transactionOperations,
+            CommonEventPublisher eventPublisher
+    ) {
+        this.orderRepository = orderRepository;
+        this.orderMapper = orderMapper;
+        this.eventServiceClient = eventServiceClient;
+        this.promotionServiceClient = promotionServiceClient;
+        this.paymentServiceClient = paymentServiceClient;
+        this.ticketServiceClient = ticketServiceClient;
+        this.inventoryLockService = inventoryLockService;
+        this.transactionOperations = transactionOperations;
+        this.eventPublisher = eventPublisher;
+    }
+
+    public void setTicketServiceClient(TicketServiceClient ticketServiceClient) {
+        this.ticketServiceClient = ticketServiceClient;
     }
 
     @Override
@@ -866,6 +899,255 @@ public class OrderServiceImpl implements OrderService {
             );
         } catch (Exception e) {
             log.error("Lỗi khi publish event order.expired cho orderCode={}", order.getOrderCode(), e);
+        }
+    }
+
+    @Override
+    public OrderRefundResponse requestRefund(UUID id, OrderRefundRequest request, UUID currentUserId, boolean isAdminOrStaff) {
+        Order order = orderRepository.findByIdWithItems(id)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng"));
+        return requestRefundInternal(order, request, currentUserId, isAdminOrStaff);
+    }
+
+    @Override
+    public OrderRefundResponse requestRefundByCode(String orderCode, OrderRefundRequest request, UUID currentUserId, boolean isAdminOrStaff) {
+        Order order = orderRepository.findByOrderCodeWithItems(orderCode)
+                .orElseThrow(() -> new AppException(ErrorCode.RESOURCE_NOT_FOUND, "Không tìm thấy đơn hàng với mã: " + orderCode));
+        return requestRefundInternal(order, request, currentUserId, isAdminOrStaff);
+    }
+
+    private OrderRefundResponse requestRefundInternal(Order order, OrderRefundRequest request, UUID currentUserId, boolean isAdminOrStaff) {
+        validateOrderAccess(order, currentUserId, isAdminOrStaff);
+
+        if (order.getStatus() != OrderStatus.PAID) {
+            throw new AppException(ErrorCode.BAD_REQUEST,
+                    "Chỉ có thể hoàn tiền cho đơn hàng đã thanh toán (PAID), hiện tại: " + order.getStatus());
+        }
+
+        UUID orderId = order.getId();
+        String reason = request != null && request.getReason() != null ? request.getReason().trim() : "Khách hàng yêu cầu hoàn vé";
+
+        // 1. Kiểm tra vé đã check-in hay chưa qua ticket-service
+        if (ticketServiceClient != null) {
+            try {
+                ApiResponse<Boolean> usedResp = ticketServiceClient.hasUsedTickets(internalSecret, orderId);
+                if (usedResp != null && Boolean.TRUE.equals(usedResp.getData())) {
+                    throw new AppException(ErrorCode.CONFLICT, "Không thể hoàn vé vì vé trong đơn hàng đã được sử dụng (check-in)");
+                }
+            } catch (AppException e) {
+                throw e;
+            } catch (Exception e) {
+                log.warn("Không thể kiểm tra trạng thái vé từ ticket-service cho orderId={}: {}", orderId, e.getMessage());
+            }
+        }
+
+        // 2. Kiểm tra chính sách hoàn vé của sự kiện và hạn hoàn tiền
+        InternalEventSnapshotResponse snapshot = null;
+        if (eventServiceClient != null && order.getEventId() != null) {
+            try {
+                ApiResponse<InternalEventSnapshotResponse> snapshotResp = eventServiceClient.getEventSnapshot(internalSecret, order.getEventId());
+                if (snapshotResp != null && snapshotResp.isSuccess()) {
+                    snapshot = snapshotResp.getData();
+                }
+            } catch (Exception e) {
+                log.warn("Không thể lấy thông tin sự kiện từ event-service cho eventId={}: {}", order.getEventId(), e.getMessage());
+            }
+        }
+
+        if (snapshot != null) {
+            if ("NO_REFUND".equalsIgnoreCase(snapshot.getRefundPolicy())) {
+                throw new AppException(ErrorCode.CONFLICT, "Sự kiện áp dụng chính sách không hỗ trợ hoàn vé (NO_REFUND)");
+            }
+
+            int deadlineDays = snapshot.getRefundDeadlineDays() != null
+                    ? snapshot.getRefundDeadlineDays()
+                    : (snapshot.getRefundDeadlineHours() != null ? snapshot.getRefundDeadlineHours() : 0);
+
+            if (deadlineDays > 0 && order.getShowTimeId() != null) {
+                try {
+                    ApiResponse<ShowTimeResponse> showTimeResp = eventServiceClient.getShowTime(internalSecret, order.getShowTimeId());
+                    if (showTimeResp != null && showTimeResp.isSuccess() && showTimeResp.getData() != null) {
+                        Instant showTimeStart = showTimeResp.getData().getStartTime();
+                        if (showTimeStart != null) {
+                            Instant deadline = showTimeStart.minus(Duration.ofDays(deadlineDays));
+                            if (Instant.now().isAfter(deadline)) {
+                                throw new AppException(ErrorCode.CONFLICT,
+                                        String.format("Đã quá thời hạn được phép hoàn vé (%d ngày trước giờ diễn)", deadlineDays));
+                            }
+                        }
+                    }
+                } catch (AppException e) {
+                    throw e;
+                } catch (Exception e) {
+                    log.warn("Lỗi khi kiểm tra suất diễn từ event-service cho showTimeId={}: {}", order.getShowTimeId(), e.getMessage());
+                }
+            }
+        }
+
+        // 3. Tính toán phí khấu trừ hoàn tiền
+        BigDecimal feePercent = snapshot != null && snapshot.getRefundFeePercent() != null
+                ? snapshot.getRefundFeePercent()
+                : BigDecimal.ZERO;
+        BigDecimal originalAmount = order.getTotalAmount() != null ? order.getTotalAmount() : BigDecimal.ZERO;
+        BigDecimal feeAmount = originalAmount.multiply(feePercent)
+                .divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
+        BigDecimal refundAmount = originalAmount.subtract(feeAmount);
+        if (refundAmount.compareTo(BigDecimal.ZERO) < 0) {
+            refundAmount = BigDecimal.ZERO;
+        }
+
+        // 4. Hủy vé trong ticket-service
+        if (ticketServiceClient != null) {
+            try {
+                ticketServiceClient.cancelTicketsByOrderId(internalSecret, orderId, reason);
+            } catch (Exception e) {
+                log.warn("Lỗi khi hủy vé trong ticket-service cho orderId={}: {}", orderId, e.getMessage());
+            }
+        }
+
+        // 5. Cập nhật trạng thái đơn hàng sang REFUNDED
+        order.setStatus(OrderStatus.REFUNDED);
+        order.setUpdatedAt(Instant.now());
+        Order savedOrder = orderRepository.save(order);
+
+        // 6. Trả lại số lượng vé vào kho (releaseSoldInventory) để khách khác có thể mua
+        releaseSoldInventoryForOrder(savedOrder);
+
+        // 7. Gọi payment-service để thực hiện hoàn tiền
+        if (paymentServiceClient != null && refundAmount.compareTo(BigDecimal.ZERO) > 0) {
+            try {
+                InternalRefundOrderRequest refundReq = InternalRefundOrderRequest.builder()
+                        .orderId(savedOrder.getId())
+                        .amount(refundAmount)
+                        .reason(reason)
+                        .idempotencyKey("REFUND-" + savedOrder.getOrderCode() + "-" + System.currentTimeMillis())
+                        .build();
+                paymentServiceClient.refundByOrder(internalSecret, refundReq);
+            } catch (Exception e) {
+                log.error("Lỗi khi gọi payment-service hoàn tiền cho orderCode={}: {}", savedOrder.getOrderCode(), e.getMessage());
+            }
+        }
+
+        return OrderRefundResponse.builder()
+                .orderId(savedOrder.getId())
+                .orderCode(savedOrder.getOrderCode())
+                .status(OrderStatus.REFUNDED)
+                .originalAmount(originalAmount)
+                .refundFeePercent(feePercent)
+                .refundFeeAmount(feeAmount)
+                .refundAmount(refundAmount)
+                .reason(reason)
+                .refundedAt(savedOrder.getUpdatedAt())
+                .message("Xử lý hoàn vé và hoàn tiền thành công")
+                .build();
+    }
+
+    @Override
+    @Transactional
+    public void processEventCancellation(EventCancelledEventPayload payload) {
+        if (payload == null || payload.getEventId() == null) {
+            log.warn("Payload event.cancelled không hợp lệ: {}", payload);
+            return;
+        }
+
+        UUID eventId = payload.getEventId();
+        String reason = payload.getCancellationReason() != null ? payload.getCancellationReason() : "Sự kiện bị hủy bởi ban tổ chức";
+        log.info("Xử lý hủy đơn và hoàn tiền tự động cho sự kiện eventId={}, reason={}", eventId, reason);
+
+        List<Order> orders = orderRepository.findByEventIdAndStatusInWithItems(
+                eventId,
+                List.of(OrderStatus.PAID, OrderStatus.PENDING)
+        );
+
+        if (orders.isEmpty()) {
+            log.info("Không có đơn hàng nào cần xử lý cho sự kiện bị hủy eventId={}", eventId);
+            return;
+        }
+
+        log.info("Tìm thấy {} đơn hàng (PAID/PENDING) cần xử lý do sự kiện bị hủy eventId={}", orders.size(), eventId);
+
+        for (Order order : orders) {
+            try {
+                if (order.getStatus() == OrderStatus.PAID) {
+                    // 1. Khóa / hủy vé trong ticket-service
+                    if (ticketServiceClient != null) {
+                        try {
+                            ticketServiceClient.cancelTicketsByOrderId(internalSecret, order.getId(), reason);
+                        } catch (Exception e) {
+                            log.warn("Lỗi khi hủy vé cho orderId={} trong event cancellation: {}", order.getId(), e.getMessage());
+                        }
+                    }
+
+                    // 2. Chuyển trạng thái đơn hàng sang REFUNDED
+                    order.setStatus(OrderStatus.REFUNDED);
+                    order.setUpdatedAt(Instant.now());
+                    orderRepository.save(order);
+
+                    // 3. Hoàn tiền 100% không khấu trừ phí
+                    BigDecimal refundAmount = order.getTotalAmount() != null ? order.getTotalAmount() : BigDecimal.ZERO;
+                    if (paymentServiceClient != null && refundAmount.compareTo(BigDecimal.ZERO) > 0) {
+                        try {
+                            InternalRefundOrderRequest refundReq = InternalRefundOrderRequest.builder()
+                                    .orderId(order.getId())
+                                    .amount(refundAmount)
+                                    .reason("Sự kiện bị hủy: " + reason)
+                                    .idempotencyKey("EVENT-CANCEL-REFUND-" + order.getOrderCode() + "-" + eventId)
+                                    .build();
+                            paymentServiceClient.refundByOrder(internalSecret, refundReq);
+                        } catch (Exception e) {
+                            log.error("Lỗi khi gọi payment-service hoàn tiền cho orderCode={} (sự kiện bị hủy): {}",
+                                    order.getOrderCode(), e.getMessage());
+                        }
+                    }
+
+                    // 4. Hoàn trả voucher về ví cho khách (100% tiền + hoàn voucher)
+                    releaseVoucherForOrder(order, "EVENT_CANCELLED");
+
+                    log.info("Đã hoàn tiền 100% và hoàn voucher cho đơn hàng PAID: orderCode={}", order.getOrderCode());
+
+                } else if (order.getStatus() == OrderStatus.PENDING) {
+                    // Đơn đang PENDING: hủy đơn, nhả giữ chỗ tồn kho và hoàn voucher
+                    order.setStatus(OrderStatus.CANCELLED);
+                    order.setUpdatedAt(Instant.now());
+                    orderRepository.save(order);
+
+                    releaseInventoryForOrder(order);
+                    releaseVoucherForOrder(order, "EVENT_CANCELLED");
+
+                    log.info("Đã hủy đơn hàng PENDING: orderCode={}", order.getOrderCode());
+                }
+            } catch (Exception ex) {
+                log.error("Lỗi khi xử lý đơn hàng orderCode={} cho sự kiện bị hủy eventId={}",
+                        order.getOrderCode(), eventId, ex);
+            }
+        }
+    }
+
+    private void releaseSoldInventoryForOrder(Order order) {
+        if (order == null || order.getItems() == null || order.getItems().isEmpty() || order.getShowTimeId() == null) {
+            return;
+        }
+
+        List<TicketItemReservationRequest> releaseItems = order.getItems().stream()
+                .map(item -> TicketItemReservationRequest.builder()
+                        .ticketTypeId(item.getTicketTypeId())
+                        .quantity(item.getQuantity())
+                        .build())
+                .toList();
+
+        ReleaseInventoryRequest releaseRequest = ReleaseInventoryRequest.builder()
+                .showTimeId(order.getShowTimeId())
+                .items(releaseItems)
+                .build();
+
+        try {
+            ApiResponse<Void> response = eventServiceClient.releaseSoldInventory(internalSecret, releaseRequest);
+            if (response != null && !response.isSuccess()) {
+                log.warn("event-service trả về lỗi khi giải phóng tồn kho vé đã bán cho đơn hàng {}: {}",
+                        order.getOrderCode(), response.getMessage());
+            }
+        } catch (Exception e) {
+            log.error("Lỗi Feign khi gọi event-service releaseSoldInventory cho orderCode={}", order.getOrderCode(), e);
         }
     }
 }

@@ -42,6 +42,9 @@ public interface OrderRepository extends JpaRepository<Order, UUID>, JpaSpecific
     @Query("SELECT DISTINCT o FROM Order o LEFT JOIN FETCH o.items WHERE o.status = :status AND o.expiresAt < :now")
     List<Order> findByStatusAndExpiresAtBeforeWithItems(@Param("status") OrderStatus status, @Param("now") Instant now);
 
+    @Query("SELECT DISTINCT o FROM Order o LEFT JOIN FETCH o.items WHERE o.eventId = :eventId AND o.status IN :statuses")
+    List<Order> findByEventIdAndStatusInWithItems(@Param("eventId") UUID eventId, @Param("statuses") List<OrderStatus> statuses);
+
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("UPDATE Order o SET o.status = :newStatus, o.updatedAt = :now WHERE o.id = :id AND o.status = :expectedStatus")
     int updateOrderStatusIfMatch(

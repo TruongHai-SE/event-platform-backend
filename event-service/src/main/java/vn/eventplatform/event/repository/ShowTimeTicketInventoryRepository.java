@@ -97,4 +97,12 @@ public interface ShowTimeTicketInventoryRepository extends JpaRepository<ShowTim
         WHERE inv.id = :id AND inv.reservedQuantity >= :qty
     """)
     int confirmInventorySlot(@Param("id") UUID id, @Param("qty") int qty);
+
+    @Modifying(flushAutomatically = true)
+    @Query("""
+        UPDATE ShowTimeTicketInventory inv
+        SET inv.soldQuantity = inv.soldQuantity - :qty
+        WHERE inv.id = :id AND inv.soldQuantity >= :qty
+    """)
+    int releaseSoldInventorySlot(@Param("id") UUID id, @Param("qty") int qty);
 }

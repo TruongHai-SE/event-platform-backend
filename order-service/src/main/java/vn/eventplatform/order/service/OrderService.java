@@ -47,4 +47,10 @@ public interface OrderService {
     OrderResponse getInternalOrderByCode(String orderCode);
 
     OrderResponse markOrderPaid(UUID id, vn.eventplatform.order.dto.OrderMarkPaidRequest request);
+
+    vn.eventplatform.order.dto.OrderRefundResponse requestRefund(UUID id, vn.eventplatform.order.dto.OrderRefundRequest request, UUID currentUserId, boolean isAdminOrStaff);
+
+    vn.eventplatform.order.dto.OrderRefundResponse requestRefundByCode(String orderCode, vn.eventplatform.order.dto.OrderRefundRequest request, UUID currentUserId, boolean isAdminOrStaff);
+
+    void processEventCancellation(vn.eventplatform.common.messaging.event.EventCancelledEventPayload payload);
 }
