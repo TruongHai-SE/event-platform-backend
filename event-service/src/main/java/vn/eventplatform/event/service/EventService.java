@@ -14,6 +14,9 @@ import org.springframework.web.multipart.MultipartFile;
 import vn.eventplatform.common.dto.ErrorCode;
 import vn.eventplatform.common.exception.AppException;
 import vn.eventplatform.event.client.TicketServiceClient;
+import org.springframework.beans.factory.annotation.Autowired;
+import vn.eventplatform.common.messaging.EventPlatformMessagingConfig;
+import vn.eventplatform.common.messaging.event.EventCancelledEventPayload;
 import vn.eventplatform.event.domain.Category;
 import vn.eventplatform.event.domain.Event;
 import vn.eventplatform.event.domain.OutboxEvent;
@@ -74,6 +77,9 @@ public class EventService {
 
     @Value("${security.internal.secret:internal-secret-key}")
     private String internalSecret;
+
+    @Autowired(required = false)
+    private EventPlatformMessagingConfig.CommonEventPublisher eventPublisher;
 
     @Transactional
     public EventDto.EventDetailResponse createDraftEvent(UUID organizerId, EventDto.CreateEventRequest request) {
@@ -866,6 +872,25 @@ public class EventService {
                 );
             } catch (Exception ex) {
                 log.warn("Non-fatal error calling ticket-service on event cancellation (saved to Outbox): {}", ex.getMessage());
+            }
+        }
+
+        if (eventPublisher != null) {
+            try {
+                EventCancelledEventPayload payload = EventCancelledEventPayload.builder()
+                        .eventId(event.getId())
+                        .showTimeIds(showTimeIds)
+                        .cancellationReason(reason)
+                        .cancelledAt(event.getCancelledAt())
+                        .build();
+                eventPublisher.publish(
+                        EventPlatformMessagingConfig.RK_EVENT_CANCELLED,
+                        EventPlatformMessagingConfig.EVENT_TYPE_EVENT_CANCELLED,
+                        payload
+                );
+                log.info("Đã publish event.cancelled cho eventId={}, routingKey={}", event.getId(), EventPlatformMessagingConfig.RK_EVENT_CANCELLED);
+            } catch (Exception ex) {
+                log.error("Lỗi khi publish event.cancelled cho eventId={}", event.getId(), ex);
             }
         }
 

@@ -28,6 +28,14 @@ import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
 import vn.eventplatform.payment.repository.PaymentRepository;
 import vn.eventplatform.payment.repository.RefundLogRepository;
 
+import vn.eventplatform.payment.domain.RefundLog;
+import vn.eventplatform.payment.domain.RefundStatus;
+import vn.eventplatform.payment.dto.ConfirmManualRefundRequest;
+import vn.eventplatform.payment.dto.CreateRefundRequest;
+import vn.eventplatform.payment.dto.InternalRefundOrderRequest;
+import vn.eventplatform.payment.dto.RefundResponse;
+import vn.eventplatform.payment.payment.dto.RefundResult;
+import java.util.Optional;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -1079,6 +1087,208 @@ class PaymentServiceTest {
 
         assertThat(cancelledCount).isEqualTo(0);
         verify(eventPublisher, never()).publish(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("createRefund: Hoàn 100% số tiền giao dịch chuyển trạng thái Payment sang REFUNDED")
+    void createRefund_FullAmount_TransitionsPaymentToRefunded() {
+        UUID paymentId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode("ORDER-100")
+                .amount(new BigDecimal("500000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        CreateRefundRequest request = CreateRefundRequest.builder()
+                .paymentId(paymentId)
+                .amount(new BigDecimal("500000.00"))
+                .reason("Khách hủy vé")
+                .build();
+
+        when(paymentRepository.findById(paymentId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(paymentId)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .success(true)
+                .status(RefundStatus.SUCCESS)
+                .gatewayRefundId("VNPAY-REFUND-01")
+                .refundedAmount(new BigDecimal("500000.00"))
+                .refundedAt(Instant.now())
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).amount(l.getAmount()).build();
+        });
+
+        RefundResponse response = paymentService.createRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
+        verify(paymentRepository).save(payment);
+    }
+
+    @Test
+    @DisplayName("createRefund: Hoàn một phần số tiền giữ nguyên trạng thái Payment SUCCESS")
+    void createRefund_PartialAmount_KeepsPaymentSuccess() {
+        UUID paymentId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode("ORDER-100")
+                .amount(new BigDecimal("500000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        CreateRefundRequest request = CreateRefundRequest.builder()
+                .paymentId(paymentId)
+                .amount(new BigDecimal("200000.00"))
+                .reason("Hoàn vé 1 người trong nhóm")
+                .build();
+
+        when(paymentRepository.findById(paymentId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(paymentId)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .success(true)
+                .status(RefundStatus.SUCCESS)
+                .gatewayRefundId("VNPAY-REFUND-PARTIAL")
+                .refundedAmount(new BigDecimal("200000.00"))
+                .refundedAt(Instant.now())
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).amount(l.getAmount()).build();
+        });
+
+        RefundResponse response = paymentService.createRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.SUCCESS);
+        verify(paymentRepository, never()).save(payment);
+    }
+
+    @Test
+    @DisplayName("createRefund: Tổng tiền hoàn vượt quá số tiền thanh toán gốc ném ngoại lệ BAD_REQUEST")
+    void createRefund_ExceedsTotalAmount_ThrowsBadRequest() {
+        UUID paymentId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .amount(new BigDecimal("500000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .build();
+
+        RefundLog existingLog = RefundLog.builder()
+                .amount(new BigDecimal("350000.00"))
+                .status(RefundStatus.SUCCESS)
+                .build();
+
+        CreateRefundRequest request = CreateRefundRequest.builder()
+                .paymentId(paymentId)
+                .amount(new BigDecimal("200000.00")) // 350k + 200k = 550k > 500k
+                .build();
+
+        when(paymentRepository.findById(paymentId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(paymentId)).thenReturn(List.of(existingLog));
+
+        assertThatThrownBy(() -> paymentService.createRefund(request))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("vượt quá số tiền thanh toán gốc");
+    }
+
+    @Test
+    @DisplayName("createRefund: Mock sandbox tự động sinh mock gateway id khi strategy trả về non-success")
+    void createRefund_MockSandbox_SimulatesSuccess() {
+        UUID paymentId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(paymentId)
+                .orderId(orderId)
+                .orderCode("ORDER-200")
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .method(PaymentGateway.SEPAY)
+                .build();
+
+        CreateRefundRequest request = CreateRefundRequest.builder()
+                .paymentId(paymentId)
+                .amount(new BigDecimal("100000.00"))
+                .build();
+
+        when(paymentRepository.findById(paymentId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(paymentId)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.SEPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .success(false)
+                .status(RefundStatus.MANUAL_BANK)
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder()
+                    .id(l.getId())
+                    .status(l.getStatus())
+                    .gatewayRefundId(l.getGatewayRefundId())
+                    .amount(l.getAmount())
+                    .build();
+        });
+
+        paymentService.setMockRefundEnabled(true);
+        RefundResponse response = paymentService.createRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(response.getGatewayRefundId()).startsWith("MOCK-SEPAY-");
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
+    }
+
+    @Test
+    @DisplayName("confirmManualRefund: Kế toán xác nhận chuyển khoản thủ công thành công và cập nhật Payment REFUNDED")
+    void confirmManualRefund_Success_TransitionsPaymentToRefunded() {
+        UUID refundLogId = UUID.randomUUID();
+        UUID paymentId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(paymentId)
+                .amount(new BigDecimal("300000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .build();
+
+        RefundLog refundLog = RefundLog.builder()
+                .id(refundLogId)
+                .payment(payment)
+                .amount(new BigDecimal("300000.00"))
+                .status(RefundStatus.MANUAL_BANK)
+                .reason("Yêu cầu hoàn SePay")
+                .build();
+
+        ConfirmManualRefundRequest request = ConfirmManualRefundRequest.builder()
+                .gatewayRefundId("FT261023998877")
+                .note("Đã hoàn tiền qua ngân hàng VCB")
+                .build();
+
+        when(refundLogRepository.findById(refundLogId)).thenReturn(Optional.of(refundLog));
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(refundLogRepository.findByPaymentId(paymentId)).thenReturn(List.of(refundLog));
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).gatewayRefundId(l.getGatewayRefundId()).build();
+        });
+
+        RefundResponse response = paymentService.confirmManualRefund(refundLogId, request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(response.getGatewayRefundId()).isEqualTo("FT261023998877");
+        assertThat(refundLog.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
+        verify(paymentRepository).save(payment);
     }
 }
 

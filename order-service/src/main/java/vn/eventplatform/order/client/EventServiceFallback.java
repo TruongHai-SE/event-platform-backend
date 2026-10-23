@@ -165,4 +165,47 @@ public class EventServiceFallback implements EventServiceClient {
         }
         return ApiResponse.ok("Lấy danh sách tồn kho vé thành công", list);
     }
+
+    @Override
+    public ApiResponse<Void> releaseSoldInventory(String secret, ReleaseInventoryRequest request) {
+        log.info("[EventServiceFallback] Nhả tồn kho vé đã bán cho showTimeId={}", request.getShowTimeId());
+        if (request.getItems() != null) {
+            synchronized (this) {
+                for (TicketItemReservationRequest itemReq : request.getItems()) {
+                    String key = buildKey(request.getShowTimeId(), itemReq.getTicketTypeId());
+                    MockInventoryItem item = inventoryStore.get(key);
+                    if (item != null) {
+                        item.soldQuantity = Math.max(0, item.soldQuantity - itemReq.getQuantity());
+                    }
+                }
+            }
+        }
+        return ApiResponse.ok(null);
+    }
+
+    @Override
+    public ApiResponse<InternalEventSnapshotResponse> getEventSnapshot(String secret, UUID eventId) {
+        log.info("[EventServiceFallback] getEventSnapshot for eventId={}", eventId);
+        return ApiResponse.ok(InternalEventSnapshotResponse.builder()
+                .id(eventId)
+                .title("Mock Event")
+                .status("PUBLISHED")
+                .refundPolicy("ALLOW_REFUND")
+                .refundDeadlineDays(1)
+                .refundDeadlineHours(24)
+                .refundFeePercent(new BigDecimal("10.00"))
+                .nextShowTime(java.time.Instant.now().plus(java.time.Duration.ofDays(7)))
+                .build());
+    }
+
+    @Override
+    public ApiResponse<ShowTimeResponse> getShowTime(String secret, UUID showTimeId) {
+        log.info("[EventServiceFallback] getShowTime for showTimeId={}", showTimeId);
+        return ApiResponse.ok(ShowTimeResponse.builder()
+                .id(showTimeId)
+                .startTime(java.time.Instant.now().plus(java.time.Duration.ofDays(7)))
+                .endTime(java.time.Instant.now().plus(java.time.Duration.ofDays(7)).plus(java.time.Duration.ofHours(3)))
+                .status("SCHEDULED")
+                .build());
+    }
 }

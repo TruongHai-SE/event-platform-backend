@@ -58,6 +58,11 @@ public class EventPlatformMessagingConfig {
     public static final String RK_TICKET_RESERVATION = "ticket.reservation.*";
     public static final String RK_TICKET_RESERVATION_DLQ = "dlq.ticket.reservation";
 
+    public static final String QUEUE_ORDER_EVENT_CANCELLED = "q.order.event.cancelled";
+    public static final String QUEUE_ORDER_EVENT_CANCELLED_DLQ = "q.order.event.cancelled.dlq";
+    public static final String RK_EVENT_CANCELLED = "event.lifecycle.cancelled";
+    public static final String RK_EVENT_CANCELLED_DLQ = "dlq.order.event.cancelled";
+
     public static final String RK_PAYMENT_ORDER_CREATED = "payment.order.created";
     public static final String RK_PAYMENT_ORDER_PAID = "payment.order.paid";
     public static final String RK_PAYMENT_ORDER_SUCCESS = "payment.order.success";
@@ -69,6 +74,7 @@ public class EventPlatformMessagingConfig {
     public static final String EVENT_TYPE_PAYMENT_SUCCESS = "payment.success";
     public static final String EVENT_TYPE_ORDER_EXPIRED = "order.expired";
     public static final String EVENT_TYPE_PAYMENT_FAILED = "payment.failed";
+    public static final String EVENT_TYPE_EVENT_CANCELLED = "event.cancelled";
 
     @Bean
     public TopicExchange eventPlatformExchange() {
@@ -160,6 +166,29 @@ public class EventPlatformMessagingConfig {
     }
 
     @Bean
+    public Queue orderEventCancelledQueue() {
+        return QueueBuilder.durable(QUEUE_ORDER_EVENT_CANCELLED)
+                .withArgument("x-dead-letter-exchange", DLX_EXCHANGE)
+                .withArgument("x-dead-letter-routing-key", RK_EVENT_CANCELLED_DLQ)
+                .build();
+    }
+
+    @Bean
+    public Queue orderEventCancelledDlq() {
+        return QueueBuilder.durable(QUEUE_ORDER_EVENT_CANCELLED_DLQ).build();
+    }
+
+    @Bean
+    public Binding orderEventCancelledBinding(Queue orderEventCancelledQueue, TopicExchange eventPlatformExchange) {
+        return BindingBuilder.bind(orderEventCancelledQueue).to(eventPlatformExchange).with(RK_EVENT_CANCELLED);
+    }
+
+    @Bean
+    public Binding orderEventCancelledDlqBinding(Queue orderEventCancelledDlq, DirectExchange eventPlatformDeadLetterExchange) {
+        return BindingBuilder.bind(orderEventCancelledDlq).to(eventPlatformDeadLetterExchange).with(RK_EVENT_CANCELLED_DLQ);
+    }
+
+    @Bean
     @ConditionalOnMissingBean(MessageConverter.class)
     public MessageConverter jackson2JsonMessageConverter(ObjectMapper objectMapper) {
         return new Jackson2JsonMessageConverter(objectMapper);
@@ -212,6 +241,8 @@ public class EventPlatformMessagingConfig {
                     Queue qPaymentDlq = paymentOrderDlq();
                     Queue qTicket = ticketReservationQueue();
                     Queue qTicketDlq = ticketReservationDlq();
+                    Queue qOrderEventCancelled = orderEventCancelledQueue();
+                    Queue qOrderEventCancelledDlq = orderEventCancelledDlq();
 
                     admin.declareExchange(mainEx);
                     admin.declareExchange(dlxEx);
@@ -221,6 +252,8 @@ public class EventPlatformMessagingConfig {
                     admin.declareQueue(qPaymentDlq);
                     admin.declareQueue(qTicket);
                     admin.declareQueue(qTicketDlq);
+                    admin.declareQueue(qOrderEventCancelled);
+                    admin.declareQueue(qOrderEventCancelledDlq);
                     admin.declareBinding(notificationEmailBinding(qEmail, mainEx));
                     admin.declareBinding(notificationEmailDlqBinding(qEmailDlq, dlxEx));
                     admin.declareBinding(paymentOrderBinding(qPayment, mainEx));
@@ -229,6 +262,8 @@ public class EventPlatformMessagingConfig {
                     admin.declareBinding(ticketReservationPaymentSuccessBinding(qTicket, mainEx));
                     admin.declareBinding(ticketReservationOrderPaidBinding(qTicket, mainEx));
                     admin.declareBinding(ticketReservationDlqBinding(qTicketDlq, dlxEx));
+                    admin.declareBinding(orderEventCancelledBinding(qOrderEventCancelled, mainEx));
+                    admin.declareBinding(orderEventCancelledDlqBinding(qOrderEventCancelledDlq, dlxEx));
                     log.info("Initialized RabbitMQ topology: exchange={}, dlx={}", MAIN_EXCHANGE, DLX_EXCHANGE);
                 } catch (Exception ex) {
                     log.warn("Deferred RabbitMQ topology initialization: {}", ex.getMessage());

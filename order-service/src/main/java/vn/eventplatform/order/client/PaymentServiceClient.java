@@ -16,4 +16,10 @@ public interface PaymentServiceClient {
             @RequestHeader("X-Internal-Secret") String secret,
             @RequestBody InternalRetryPaymentRequest request
     );
+
+    @PostMapping("/internal/v1/payments/refund")
+    ApiResponse<vn.eventplatform.order.client.dto.RefundResponse> refundByOrder(
+            @RequestHeader("X-Internal-Secret") String secret,
+            @RequestBody vn.eventplatform.order.client.dto.InternalRefundOrderRequest request
+    );
 }

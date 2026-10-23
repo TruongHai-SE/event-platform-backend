@@ -70,6 +70,13 @@ public class PaymentServiceImpl implements PaymentService {
     @Value("${security.internal.secret}")
     private String internalSecret;
 
+    @Value("${payment.mock-refund:true}")
+    private boolean mockRefundEnabled = true;
+
+    public void setMockRefundEnabled(boolean mockRefundEnabled) {
+        this.mockRefundEnabled = mockRefundEnabled;
+    }
+
     @Override
     @Transactional
     public PaymentInitResponse createPayment(CreatePaymentRequest request, String clientIp) {
@@ -622,12 +629,29 @@ public class PaymentServiceImpl implements PaymentService {
         Payment payment = paymentRepository.findById(request.getPaymentId())
                 .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy giao dịch thanh toán gốc"));
 
-        if (payment.getStatus() != PaymentStatus.SUCCESS) {
+        if (payment.getStatus() != PaymentStatus.SUCCESS && payment.getStatus() != PaymentStatus.REFUNDED) {
             throw new AppException(ErrorCode.BAD_REQUEST, "Chỉ có thể hoàn tiền cho giao dịch đã thanh toán thành công");
         }
 
-        if (request.getAmount().compareTo(payment.getAmount()) > 0) {
-            throw new AppException(ErrorCode.BAD_REQUEST, "Số tiền hoàn không được vượt quá số tiền thanh toán gốc");
+        if (request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank()) {
+            var existingLog = refundLogRepository.findByIdempotencyKey(request.getIdempotencyKey());
+            if (existingLog.isPresent()) {
+                log.info("Yêu cầu hoàn tiền đã tồn tại với idempotencyKey={}", request.getIdempotencyKey());
+                return refundLogMapper.toResponse(existingLog.get());
+            }
+        }
+
+        List<RefundLog> existingRefunds = refundLogRepository.findByPaymentId(payment.getId());
+        BigDecimal totalRefunded = existingRefunds.stream()
+                .filter(r -> r.getStatus() == RefundStatus.SUCCESS)
+                .map(RefundLog::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal requestedTotal = totalRefunded.add(request.getAmount());
+        if (requestedTotal.compareTo(payment.getAmount()) > 0) {
+            throw new AppException(ErrorCode.BAD_REQUEST,
+                    String.format("Tổng số tiền hoàn (%s) vượt quá số tiền thanh toán gốc (%s). Đã hoàn: %s",
+                            requestedTotal, payment.getAmount(), totalRefunded));
         }
 
         RefundLog refundLog = RefundLog.builder()
@@ -653,12 +677,123 @@ public class PaymentServiceImpl implements PaymentService {
 
         RefundResult refundResult = paymentStrategyFactory.getStrategy(payment.getMethod()).refund(refundContext);
 
+        if (mockRefundEnabled && (refundResult == null || refundResult.getStatus() != RefundStatus.SUCCESS)) {
+            log.info("MOCK SANDBOX: Tự động giả lập hoàn tiền thành công cho paymentId={}, method={}, amount={}",
+                    payment.getId(), payment.getMethod(), request.getAmount());
+            refundResult = RefundResult.builder()
+                    .success(true)
+                    .refundLogId(savedRefundLog.getId())
+                    .status(RefundStatus.SUCCESS)
+                    .gatewayRefundId("MOCK-" + (payment.getMethod() != null ? payment.getMethod().name() : "GATEWAY") + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase())
+                    .message("Hoàn tiền thành công (giả lập Sandbox)")
+                    .refundedAmount(request.getAmount())
+                    .refundedAt(Instant.now())
+                    .build();
+        }
+
         savedRefundLog.setStatus(refundResult.getStatus());
         savedRefundLog.setGatewayRefundId(refundResult.getGatewayRefundId());
         savedRefundLog.setRefundedAt(refundResult.getRefundedAt());
         refundLogRepository.save(savedRefundLog);
 
+        if (refundResult.getStatus() == RefundStatus.SUCCESS) {
+            BigDecimal updatedTotal = totalRefunded.add(request.getAmount());
+            if (updatedTotal.compareTo(payment.getAmount()) >= 0) {
+                payment.setStatus(PaymentStatus.REFUNDED);
+                paymentRepository.save(payment);
+                log.info("Giao dịch paymentId={} đã được hoàn đủ 100% ({}/{}). Đã chuyển trạng thái sang REFUNDED",
+                        payment.getId(), updatedTotal, payment.getAmount());
+            }
+        }
+
         return refundLogMapper.toResponse(savedRefundLog);
+    }
+
+    @Override
+    @Transactional
+    public RefundResponse refundByOrder(InternalRefundOrderRequest request) {
+        if (request.getOrderId() == null) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Order ID không được để trống");
+        }
+        if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) < 0) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Số tiền hoàn không được âm");
+        }
+
+        if (request.getAmount().compareTo(BigDecimal.ZERO) == 0) {
+            return RefundResponse.builder()
+                    .orderId(request.getOrderId())
+                    .amount(BigDecimal.ZERO)
+                    .status(RefundStatus.SUCCESS)
+                    .reason(request.getReason())
+                    .build();
+        }
+
+        Payment payment = paymentRepository.findFirstByOrderIdAndStatusOrderByCreatedAtDesc(
+                request.getOrderId(), PaymentStatus.SUCCESS
+        ).orElseGet(() -> paymentRepository.findFirstByOrderIdAndStatusOrderByCreatedAtDesc(
+                request.getOrderId(), PaymentStatus.REFUNDED
+        ).orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND,
+                "Không tìm thấy giao dịch thanh toán thành công của đơn hàng: " + request.getOrderId())));
+
+        CreateRefundRequest refundReq = CreateRefundRequest.builder()
+                .paymentId(payment.getId())
+                .amount(request.getAmount())
+                .reason(request.getReason())
+                .idempotencyKey(request.getIdempotencyKey())
+                .build();
+
+        return createRefund(refundReq);
+    }
+
+    @Override
+    @Transactional
+    public RefundResponse confirmManualRefund(UUID refundLogId, ConfirmManualRefundRequest request) {
+        RefundLog refundLog = refundLogRepository.findById(refundLogId)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy yêu cầu hoàn tiền"));
+
+        if (refundLog.getStatus() == RefundStatus.SUCCESS) {
+            log.info("Yêu cầu hoàn tiền refundLogId={} đã ở trạng thái SUCCESS (idempotent)", refundLogId);
+            return refundLogMapper.toResponse(refundLog);
+        }
+
+        if (refundLog.getStatus() != RefundStatus.MANUAL_BANK && refundLog.getStatus() != RefundStatus.PROCESSING) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Chỉ có thể xác nhận yêu cầu hoàn tiền đang ở trạng thái MANUAL_BANK hoặc PROCESSING");
+        }
+
+        refundLog.setStatus(RefundStatus.SUCCESS);
+        refundLog.setGatewayRefundId(request.getGatewayRefundId());
+        refundLog.setRefundedAt(Instant.now());
+        if (request.getNote() != null && !request.getNote().isBlank()) {
+            refundLog.setReason(refundLog.getReason() != null
+                    ? refundLog.getReason() + " | " + request.getNote().trim()
+                    : request.getNote().trim());
+        }
+        RefundLog savedRefundLog = refundLogRepository.save(refundLog);
+
+        Payment payment = refundLog.getPayment();
+        if (payment != null) {
+            List<RefundLog> allRefunds = refundLogRepository.findByPaymentId(payment.getId());
+            BigDecimal totalRefunded = allRefunds.stream()
+                    .filter(r -> r.getStatus() == RefundStatus.SUCCESS)
+                    .map(RefundLog::getAmount)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            if (totalRefunded.compareTo(payment.getAmount()) >= 0) {
+                payment.setStatus(PaymentStatus.REFUNDED);
+                paymentRepository.save(payment);
+                log.info("Giao dịch paymentId={} đã được hoàn đủ 100% ({}/{}). Đã chuyển trạng thái sang REFUNDED sau khi xác nhận thủ công",
+                        payment.getId(), totalRefunded, payment.getAmount());
+            }
+        }
+
+        return refundLogMapper.toResponse(savedRefundLog);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<RefundResponse> getRefundsByPaymentId(UUID paymentId) {
+        List<RefundLog> logs = refundLogRepository.findByPaymentId(paymentId);
+        return refundLogMapper.toResponseList(logs);
     }
 
     @Value("${payment.scheduler.expiration-threshold-minutes:15}")
