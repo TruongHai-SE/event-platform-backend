@@ -60,6 +60,9 @@ public class CheckInServiceImpl implements CheckInService {
     @Override
     @Transactional
     public CheckInResponse processCheckIn(CheckInRequest request) {
+        if (request.getStaffId() == null) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "staffId không được để trống");
+        }
         Ticket ticket = findTicket(request);
         validateTicketEligibility(ticket, request);
 

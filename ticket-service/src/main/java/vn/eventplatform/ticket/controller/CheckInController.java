@@ -65,6 +65,16 @@ public class CheckInController {
         if (effectiveRequest.getShowTimeId() == null && queryShowTimeId != null) {
             effectiveRequest = effectiveRequest.toBuilder().showTimeId(queryShowTimeId).build();
         }
+        if (effectiveRequest.getStaffId() == null) {
+            var auth = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.getName() != null && !auth.getName().isBlank()) {
+                try {
+                    UUID staffUuid = UUID.fromString(auth.getName());
+                    effectiveRequest = effectiveRequest.toBuilder().staffId(staffUuid).build();
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+        }
         return effectiveRequest;
     }
 }
