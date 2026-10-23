@@ -196,6 +196,11 @@ public class TicketServiceImpl implements TicketService {
             return ticketMapper.toResponse(ticket);
         }
 
+        if (ticket.getStatus() == TicketStatus.USED) {
+            log.warn("Không thể hủy vé id={} vì vé đã được sử dụng", ticketId);
+            throw new AppException(ErrorCode.BAD_REQUEST, "Không thể hủy vé đã được sử dụng");
+        }
+
         ticket.setStatus(TicketStatus.CANCELLED);
         ticket = ticketRepository.save(ticket);
         log.info("Vé id={} đã được chuyển sang trạng thái CANCELLED, lý do: {}", ticketId, reason);

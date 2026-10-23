@@ -67,9 +67,16 @@ public class CheckInServiceImpl implements CheckInService {
         ticket.setStatus(TicketStatus.USED);
         ticketRepository.save(ticket);
 
-        // Lưu bản ghi check-in
+        // Lưu bản ghi check-in với cơ chế bảo vệ Atomic bởi Unique Constraint uq_check_ins_ticket_id
         CheckIn checkIn = checkInMapper.toEntity(ticket, request.getStaffId(), request.getMethod());
-        checkIn = checkInRepository.save(checkIn);
+        try {
+            checkIn = checkInRepository.save(checkIn);
+            checkInRepository.flush();
+        } catch (org.springframework.dao.DataIntegrityViolationException ex) {
+            log.warn("Xung đột đồng thời khi check-in: Vi phạm unique constraint uq_check_ins_ticket_id cho ticketId={}: {}",
+                    ticket.getId(), ex.getMessage());
+            throw new AppException(ErrorCode.BAD_REQUEST, "Vé đã được sử dụng check-in trước đó");
+        }
 
         log.info("Check-in thành công: ticketId={}, staffId={}, method={}, eventId={}, showTimeId={}",
                 ticket.getId(), request.getStaffId(), request.getMethod(), ticket.getEventId(), ticket.getShowTimeId());
