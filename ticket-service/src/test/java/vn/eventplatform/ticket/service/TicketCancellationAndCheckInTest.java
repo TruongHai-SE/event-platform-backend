@@ -562,4 +562,94 @@ class TicketCancellationAndCheckInTest {
         verify(ticketRepository, never()).save(ticket);
         verify(checkInRepository, never()).save(any());
     }
+
+    @Test
+    @DisplayName("Atomic check-in: Bắt lỗi vi phạm Unique Constraint khi có xung đột đồng thời và trả về lỗi phù hợp")
+    void shouldRejectCheckInWhenDatabaseUniqueConstraintViolated() {
+        UUID ticketId = UUID.randomUUID();
+        UUID staffId = UUID.randomUUID();
+        String qrPayload = "qr-concurrent-ticket";
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(qrPayload)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        CheckIn checkIn = CheckIn.builder()
+                .ticket(ticket)
+                .staffId(staffId)
+                .build();
+
+        when(ticketRepository.findByQrPayloadWithCheckIn(qrPayload)).thenReturn(Optional.of(ticket));
+        when(checkInRepository.existsByTicketId(ticketId)).thenReturn(false);
+        when(checkInMapper.toEntity(ticket, staffId, CheckInMethod.QR_SCAN)).thenReturn(checkIn);
+        when(checkInRepository.save(checkIn)).thenReturn(checkIn);
+        doThrow(new org.springframework.dao.DataIntegrityViolationException("duplicate key value violates unique constraint uq_check_ins_ticket_id"))
+                .when(checkInRepository).flush();
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(qrPayload)
+                .staffId(staffId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Vé đã được sử dụng check-in trước đó");
+                });
+    }
+
+    @Test
+    @DisplayName("Từ chối hủy vé khi vé đã được check-in sử dụng (status = USED)")
+    void shouldRejectCancelTicketWhenTicketAlreadyUsed() {
+        UUID ticketId = UUID.randomUUID();
+        Ticket usedTicket = Ticket.builder()
+                .id(ticketId)
+                .status(TicketStatus.USED)
+                .build();
+
+        when(ticketRepository.findById(ticketId)).thenReturn(Optional.of(usedTicket));
+
+        assertThatThrownBy(() -> ticketService.cancelTicket(ticketId, "Khách yêu cầu hủy vé"))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Không thể hủy vé đã được sử dụng");
+                });
+
+        verify(ticketRepository, never()).save(usedTicket);
+    }
+
+    @Test
+    @DisplayName("Từ chối check-in qua ticketId khi vé đã bị hủy (status = CANCELLED)")
+    void shouldRejectCheckInViaTicketIdWhenTicketIsCancelled() {
+        UUID ticketId = UUID.randomUUID();
+        UUID staffId = UUID.randomUUID();
+
+        Ticket cancelledTicket = Ticket.builder()
+                .id(ticketId)
+                .status(TicketStatus.CANCELLED)
+                .build();
+
+        when(ticketRepository.findByIdWithCheckIn(ticketId)).thenReturn(Optional.of(cancelledTicket));
+
+        CheckInRequest request = CheckInRequest.builder()
+                .ticketId(ticketId)
+                .staffId(staffId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Vé đã bị khóa do sự kiện bị hủy hoặc đã được hoàn tiền");
+                });
+
+        verify(checkInRepository, never()).save(any());
+    }
 }
