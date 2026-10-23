@@ -48,6 +48,8 @@ public interface TicketService {
 
     Page<TicketResponse> getMyTickets(UUID userId, TicketFilterRequest filter, Pageable pageable);
 
+    Page<TicketResponse> searchTickets(TicketFilterRequest filter, Pageable pageable);
+
     boolean hasUsedTickets(UUID orderId);
 
     int cancelTicketsByOrderId(UUID orderId, String reason);

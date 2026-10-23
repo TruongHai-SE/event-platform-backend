@@ -167,4 +167,42 @@ class TicketControllerTest {
                 .andExpect(jsonPath("$.data").isArray())
                 .andExpect(jsonPath("$.data[0].id").value(t1.getId().toString()));
     }
+
+    @Test
+    @WithMockUser(roles = "STAFF")
+    @DisplayName("GET /api/v1/tickets - Staff/Admin tìm kiếm vé thành công")
+    void testSearchTickets_AdminOrStaff_Success() throws Exception {
+        UUID ticketId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+
+        TicketResponse t1 = TicketResponse.builder()
+                .id(ticketId)
+                .eventId(eventId)
+                .ticketTypeName("VIP")
+                .status(TicketStatus.SOLD)
+                .build();
+
+        when(ticketService.searchTickets(any(), any()))
+                .thenReturn(new PageImpl<>(List.of(t1), PageRequest.of(0, 10), 1));
+
+        mockMvc.perform(get("/api/v1/tickets")
+                        .param("keyword", "VIP")
+                        .param("eventId", eventId.toString())
+                        .param("page", "0")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.code").value("SUCCESS"))
+                .andExpect(jsonPath("$.data.items[0].id").value(ticketId.toString()))
+                .andExpect(jsonPath("$.data.items[0].ticketTypeName").value("VIP"));
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    @DisplayName("GET /api/v1/tickets - Khách hàng thường (role USER) bị chặn 403 khi gọi API quản lý vé")
+    void testSearchTickets_Customer_Forbidden() throws Exception {
+        mockMvc.perform(get("/api/v1/tickets")
+                        .param("keyword", "VIP"))
+                .andExpect(status().isForbidden());
+    }
 }

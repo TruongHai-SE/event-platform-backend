@@ -288,4 +288,32 @@ class TicketWalletAndDetailSecurityTest {
         List<TicketResponse> adminList = ticketService.getTicketsByOrderId(orderId, adminUserId, true);
         assertThat(adminList).hasSize(1);
     }
+
+    @Test
+    @DisplayName("11. searchTickets: Admin/Staff tìm kiếm và lọc danh sách vé thành công")
+    void testSearchTickets_Success() {
+        Ticket t1 = Ticket.builder()
+                .id(ticketId)
+                .eventId(eventId)
+                .ticketTypeName("VIP")
+                .seatNumber("A-01")
+                .status(TicketStatus.SOLD)
+                .build();
+
+        Page<Ticket> pageResult = new PageImpl<>(List.of(t1), PageRequest.of(0, 10), 1);
+        when(ticketRepository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(pageResult);
+
+        TicketFilterRequest filter = TicketFilterRequest.builder()
+                .keyword("VIP")
+                .eventId(eventId)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        Page<TicketResponse> responses = ticketService.searchTickets(filter, PageRequest.of(0, 10));
+
+        assertThat(responses).isNotEmpty();
+        assertThat(responses.getTotalElements()).isEqualTo(1);
+        assertThat(responses.getContent().getFirst().getTicketTypeName()).isEqualTo("VIP");
+        assertThat(responses.getContent().getFirst().getSeatNumber()).isEqualTo("A-01");
+    }
 }

@@ -314,6 +314,14 @@ public class TicketServiceImpl implements TicketService {
 
     @Override
     @Transactional(readOnly = true)
+    public Page<TicketResponse> searchTickets(TicketFilterRequest filter, Pageable pageable) {
+        Specification<Ticket> spec = TicketSpecification.filterAdminTickets(filter);
+        Page<Ticket> page = ticketRepository.findAll(spec, pageable);
+        return page.map(ticketMapper::toResponse);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public boolean hasUsedTickets(UUID orderId) {
         List<Ticket> tickets = ticketRepository.findByOrderIdWithCheckIn(orderId);
         return tickets.stream().anyMatch(t -> t.getCheckIn() != null || t.getStatus() == TicketStatus.USED);
