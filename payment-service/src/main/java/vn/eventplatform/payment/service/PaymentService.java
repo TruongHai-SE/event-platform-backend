@@ -35,5 +35,9 @@ public interface PaymentService {
 
     RefundResponse refundByOrder(InternalRefundOrderRequest request);
 
+    RefundResponse confirmManualRefund(UUID refundLogId, ConfirmManualRefundRequest request);
+
+    List<RefundResponse> getRefundsByPaymentId(UUID paymentId);
+
     int cancelExpiredPendingPayments();
 }
