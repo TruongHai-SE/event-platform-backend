@@ -53,4 +53,6 @@ public interface TicketService {
     boolean hasUsedTickets(UUID orderId);
 
     int cancelTicketsByOrderId(UUID orderId, String reason);
+
+    vn.eventplatform.ticket.dto.TicketStatisticsResponse getTicketStatistics(UUID eventId, UUID showTimeId);
 }

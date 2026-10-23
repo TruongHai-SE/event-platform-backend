@@ -223,4 +223,41 @@ class CheckInControllerTest {
                 .andExpect(jsonPath("$.data.ticketId").value(ticketId.toString()))
                 .andExpect(jsonPath("$.data.staffId").value(staffId.toString()));
     }
+
+    @Test
+    @WithMockUser(username = "11111111-1111-1111-1111-111111111111", roles = "ORGANIZER")
+    @DisplayName("POST /api/v1/check-ins - Ban tổ chức (ORGANIZER) có quyền scanner và tự động gán staffId từ token")
+    void testCheckIn_Organizer_Success_And_AutoResolvesStaffId() throws Exception {
+        UUID ticketId = UUID.randomUUID();
+        UUID organizerId = UUID.fromString("11111111-1111-1111-1111-111111111111");
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload("organizer.scan.qr")
+                .build();
+
+        CheckInResponse response = CheckInResponse.builder()
+                .id(UUID.randomUUID())
+                .ticketId(ticketId)
+                .staffId(organizerId)
+                .seatNumber("VIP-88")
+                .method(CheckInMethod.QR_SCAN)
+                .checkedInAt(Instant.now())
+                .build();
+
+        when(checkInService.processCheckIn(any(CheckInRequest.class))).thenAnswer(invocation -> {
+            CheckInRequest req = invocation.getArgument(0);
+            if (organizerId.equals(req.getStaffId())) {
+                return response;
+            }
+            throw new IllegalArgumentException("staffId không được resolve đúng");
+        });
+
+        mockMvc.perform(post("/api/v1/check-ins")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.ticketId").value(ticketId.toString()))
+                .andExpect(jsonPath("$.data.staffId").value(organizerId.toString()));
+    }
 }

@@ -205,4 +205,54 @@ class TicketControllerTest {
                         .param("keyword", "VIP"))
                 .andExpect(status().isForbidden());
     }
+
+    @Test
+    @WithMockUser(roles = "ORGANIZER")
+    @DisplayName("GET /api/v1/tickets/statistics - Ban tổ chức (ORGANIZER) xem báo cáo thống kê vé realtime")
+    void testGetStatistics_Organizer_Success() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        vn.eventplatform.ticket.dto.TicketStatisticsResponse response =
+                vn.eventplatform.ticket.dto.TicketStatisticsResponse.builder()
+                        .eventId(eventId)
+                        .totalIssued(100L)
+                        .totalSold(40L)
+                        .totalCheckedIn(50L)
+                        .totalCancelled(10L)
+                        .checkInRate(55.56)
+                        .checkInByMethod(java.util.Map.of(vn.eventplatform.ticket.domain.CheckInMethod.QR_SCAN, 50L))
+                        .byTicketType(java.util.List.of(
+                                vn.eventplatform.ticket.dto.TicketStatisticsResponse.TicketTypeStatisticsResponse.builder()
+                                        .ticketTypeId(UUID.randomUUID())
+                                        .ticketTypeName("VIP")
+                                        .totalIssued(50L)
+                                        .totalSold(10L)
+                                        .totalCheckedIn(40L)
+                                        .totalCancelled(0L)
+                                        .checkInRate(80.0)
+                                        .build()
+                        ))
+                        .build();
+
+        when(ticketService.getTicketStatistics(eventId, null)).thenReturn(response);
+
+        mockMvc.perform(get("/api/v1/tickets/statistics")
+                        .param("eventId", eventId.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.eventId").value(eventId.toString()))
+                .andExpect(jsonPath("$.data.totalIssued").value(100))
+                .andExpect(jsonPath("$.data.totalCheckedIn").value(50))
+                .andExpect(jsonPath("$.data.totalSold").value(40))
+                .andExpect(jsonPath("$.data.totalCancelled").value(10))
+                .andExpect(jsonPath("$.data.checkInRate").value(55.56))
+                .andExpect(jsonPath("$.data.byTicketType[0].ticketTypeName").value("VIP"));
+    }
+
+    @Test
+    @WithMockUser(roles = "USER")
+    @DisplayName("GET /api/v1/tickets/statistics - Khách hàng thường (role USER) bị chặn 403 khi xem báo cáo")
+    void testGetStatistics_User_Forbidden() throws Exception {
+        mockMvc.perform(get("/api/v1/tickets/statistics"))
+                .andExpect(status().isForbidden());
+    }
 }
