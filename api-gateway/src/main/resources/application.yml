@@ -58,7 +58,7 @@ spring:
         - id: ad-service-route
           uri: ${AD_SERVICE_URI:lb://ad-service}
           predicates:
-            - Path=/api/v1/ads/**, /api/v1/ad-campaigns/**, /api/v1/public/banners/**, /api/v1/public/ad-position-prices/**, /api/v1/admin/ad-packages/**, /api/v1/admin/ad-position-prices/**, /api/v1/admin/ad-campaigns/**, /api/v1/admin/banners/**, /api/v1/organizer/ad-campaigns/**
+            - Path=/api/v1/ads/**, /api/v1/ad-campaigns/**, /api/v1/public/banners/**, /api/v1/public/ad-position-prices/**, /api/v1/admin/ad-packages/**, /api/v1/admin/ad-position-prices/**, /api/v1/admin/ad-campaigns/**, /api/v1/admin/ad-bills/**, /api/v1/admin/ad-revenue/**, /api/v1/admin/banners/**, /api/v1/organizer/ad-campaigns/**, /api/v1/organizer/ad-bills/**
 
         - id: notification-service-route
           uri: ${NOTIFICATION_SERVICE_URI:lb://notification-service}
