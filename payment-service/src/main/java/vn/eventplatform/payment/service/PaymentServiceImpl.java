@@ -39,6 +39,7 @@ import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -692,6 +693,46 @@ public class PaymentServiceImpl implements PaymentService {
                 .build();
 
         return createRefund(refundReq);
+    }
+
+    @Value("${payment.scheduler.expiration-threshold-minutes:15}")
+    private long expirationThresholdMinutes = 15;
+
+    @Override
+    @Transactional
+    public int cancelExpiredPendingPayments() {
+        Instant threshold = Instant.now().minus(expirationThresholdMinutes, ChronoUnit.MINUTES);
+        List<Payment> expiredPayments = paymentRepository.findByStatusAndCreatedAtBefore(PaymentStatus.PENDING, threshold);
+        if (expiredPayments == null || expiredPayments.isEmpty()) {
+            return 0;
+        }
+
+        int count = 0;
+        Instant now = Instant.now();
+        for (Payment payment : expiredPayments) {
+            try {
+                int updatedRows = paymentRepository.updatePaymentStatusIfMatch(
+                        payment.getId(),
+                        PaymentStatus.CANCELLED,
+                        PaymentStatus.PENDING,
+                        payment.getTransactionId(),
+                        null,
+                        now
+                );
+                if (updatedRows > 0) {
+                    payment.setStatus(PaymentStatus.CANCELLED);
+                    log.info("Đã hủy giao dịch paymentId={} do quá hạn {} phút (orderCode={})",
+                            payment.getId(), expirationThresholdMinutes, payment.getOrderCode());
+                    publishPaymentFailedEvent(payment, "Giao dịch thanh toán quá hạn " + expirationThresholdMinutes + " phút");
+                    count++;
+                } else {
+                    log.debug("Payment {} không còn ở trạng thái PENDING, bỏ qua hủy quá hạn", payment.getId());
+                }
+            } catch (Exception e) {
+                log.error("Lỗi khi hủy giao dịch thanh toán quá hạn paymentId={}", payment.getId(), e);
+            }
+        }
+        return count;
     }
 
     private void publishPaymentFailedEvent(Payment payment, String reason) {

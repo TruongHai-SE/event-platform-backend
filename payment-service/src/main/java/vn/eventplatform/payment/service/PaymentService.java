@@ -34,4 +34,6 @@ public interface PaymentService {
     RefundResponse createRefund(CreateRefundRequest request);
 
     RefundResponse refundByOrder(InternalRefundOrderRequest request);
+
+    int cancelExpiredPendingPayments();
 }

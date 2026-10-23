@@ -10,7 +10,7 @@ import vn.eventplatform.ticket.domain.CheckInMethod;
 import java.util.UUID;
 
 @Getter
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class CheckInRequest {
@@ -19,8 +19,11 @@ public class CheckInRequest {
 
     private UUID ticketId;
 
-    @NotNull(message = "staffId không được để trống")
     private UUID staffId;
+
+    private UUID eventId;
+
+    private UUID showTimeId;
 
     @Builder.Default
     private CheckInMethod method = CheckInMethod.QR_SCAN;

@@ -42,9 +42,18 @@ public class TokenVerificationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
         String authHeader = request.getHeader("Authorization");
+        String token = null;
 
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
+            token = authHeader.substring(7);
+        } else {
+            String queryToken = request.getParameter("token");
+            if (queryToken != null && !queryToken.isBlank()) {
+                token = queryToken;
+            }
+        }
+
+        if (token != null) {
             try {
                 Claims claims = Jwts.parser()
                         .verifyWith(secretKey)
@@ -57,7 +66,10 @@ public class TokenVerificationFilter extends OncePerRequestFilter {
                 List<String> roles = claims.get("roles", List.class);
 
                 List<SimpleGrantedAuthority> authorities = roles != null
-                        ? roles.stream().map(SimpleGrantedAuthority::new).toList()
+                        ? roles.stream()
+                                .map(r -> r.startsWith("ROLE_") ? r : "ROLE_" + r)
+                                .map(SimpleGrantedAuthority::new)
+                                .toList()
                         : Collections.emptyList();
 
                 UsernamePasswordAuthenticationToken authentication =

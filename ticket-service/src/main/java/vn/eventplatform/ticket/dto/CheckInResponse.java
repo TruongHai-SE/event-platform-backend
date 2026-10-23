@@ -18,6 +18,9 @@ public class CheckInResponse {
     private UUID id;
     private UUID ticketId;
     private UUID staffId;
+    private UUID eventId;
+    private UUID showTimeId;
+    private String ticketTypeName;
     private CheckInMethod method;
     private String seatNumber;
     private Instant checkedInAt;

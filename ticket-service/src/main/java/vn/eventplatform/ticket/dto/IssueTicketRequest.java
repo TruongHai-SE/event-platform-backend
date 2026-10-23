@@ -15,8 +15,14 @@ import java.util.UUID;
 @AllArgsConstructor
 public class IssueTicketRequest {
 
+    private UUID userId;
+
+    private UUID eventId;
+
     @NotNull(message = "ticketTypeId không được để trống")
     private UUID ticketTypeId;
+
+    private String ticketTypeName;
 
     @NotNull(message = "showTimeId không được để trống")
     private UUID showTimeId;
