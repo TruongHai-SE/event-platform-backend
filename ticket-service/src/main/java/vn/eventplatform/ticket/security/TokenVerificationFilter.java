@@ -57,7 +57,10 @@ public class TokenVerificationFilter extends OncePerRequestFilter {
                 List<String> roles = claims.get("roles", List.class);
 
                 List<SimpleGrantedAuthority> authorities = roles != null
-                        ? roles.stream().map(SimpleGrantedAuthority::new).toList()
+                        ? roles.stream()
+                                .map(r -> r.startsWith("ROLE_") ? r : "ROLE_" + r)
+                                .map(SimpleGrantedAuthority::new)
+                                .toList()
                         : Collections.emptyList();
 
                 UsernamePasswordAuthenticationToken authentication =

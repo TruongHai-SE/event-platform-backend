@@ -159,6 +159,17 @@ public class TicketController {
         }
     }
 
+    @Operation(summary = "Báo cáo thống kê vé đã bán và đã check-in realtime (dành cho Ban tổ chức, Staff, Admin)")
+    @GetMapping("/statistics")
+    @PreAuthorize("hasAnyRole('STAFF', 'ORGANIZER', 'ADMIN')")
+    public ResponseEntity<ApiResponse<vn.eventplatform.ticket.dto.TicketStatisticsResponse>> getTicketStatistics(
+            @RequestParam(value = "eventId", required = false) UUID eventId,
+            @RequestParam(value = "showTimeId", required = false) UUID showTimeId
+    ) {
+        vn.eventplatform.ticket.dto.TicketStatisticsResponse data = ticketService.getTicketStatistics(eventId, showTimeId);
+        return ResponseEntity.ok(ApiResponse.ok(data));
+    }
+
     private boolean checkAdminOrStaff(Authentication authentication) {
         if (authentication == null || authentication.getAuthorities() == null) {
             return false;
@@ -167,6 +178,8 @@ public class TicketController {
                 .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority())
                         || "ADMIN".equals(a.getAuthority())
                         || "ROLE_STAFF".equals(a.getAuthority())
-                        || "STAFF".equals(a.getAuthority()));
+                        || "STAFF".equals(a.getAuthority())
+                        || "ROLE_ORGANIZER".equals(a.getAuthority())
+                        || "ORGANIZER".equals(a.getAuthority()));
     }
 }

@@ -17,6 +17,7 @@ import vn.eventplatform.ticket.domain.Ticket;
 import vn.eventplatform.ticket.domain.TicketStatus;
 import vn.eventplatform.ticket.dto.*;
 import vn.eventplatform.ticket.mapper.TicketMapper;
+import vn.eventplatform.ticket.repository.CheckInRepository;
 import vn.eventplatform.ticket.repository.TicketRepository;
 
 import java.time.Instant;
@@ -36,10 +37,17 @@ public class TicketServiceImpl implements TicketService {
     private final QrCodeGeneratorService qrCodeGeneratorService;
 
     @Autowired(required = false)
+    private CheckInRepository checkInRepository;
+
+    @Autowired(required = false)
     private OrderServiceClient orderServiceClient;
 
     @Value("${security.internal.secret:internal-secret-key}")
     private String internalSecret;
+
+    public void setCheckInRepository(CheckInRepository checkInRepository) {
+        this.checkInRepository = checkInRepository;
+    }
 
     @Override
     @Transactional
@@ -394,5 +402,99 @@ public class TicketServiceImpl implements TicketService {
         }
 
         throw new AppException(ErrorCode.FORBIDDEN, "Không thể xác minh quyền sở hữu vé");
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public vn.eventplatform.ticket.dto.TicketStatisticsResponse getTicketStatistics(UUID eventId, UUID showTimeId) {
+        List<vn.eventplatform.ticket.repository.projection.StatusCountProjection> statusCounts =
+                ticketRepository.countByStatus(eventId, showTimeId);
+
+        long totalSold = 0;
+        long totalCheckedIn = 0;
+        long totalCancelled = 0;
+
+        for (var sc : statusCounts) {
+            if (sc.getStatus() == null) continue;
+            long count = sc.getCount() != null ? sc.getCount() : 0L;
+            switch (sc.getStatus()) {
+                case SOLD -> totalSold += count;
+                case USED -> totalCheckedIn += count;
+                case CANCELLED -> totalCancelled += count;
+            }
+        }
+
+        long totalIssued = totalSold + totalCheckedIn + totalCancelled;
+        long activePaidTickets = totalSold + totalCheckedIn;
+        double checkInRate = activePaidTickets > 0
+                ? Math.round((totalCheckedIn * 100.0 / activePaidTickets) * 100.0) / 100.0
+                : 0.0;
+
+        // Thống kê theo loại vé
+        List<vn.eventplatform.ticket.repository.projection.TicketTypeStatusCountProjection> typeProjections =
+                ticketRepository.countByTicketTypeAndStatus(eventId, showTimeId);
+
+        java.util.Map<UUID, vn.eventplatform.ticket.dto.TicketStatisticsResponse.TicketTypeStatisticsResponse.TicketTypeStatisticsResponseBuilder> typeMap =
+                new java.util.LinkedHashMap<>();
+
+        for (var p : typeProjections) {
+            UUID typeId = p.getTicketTypeId();
+            if (typeId == null) continue;
+            var builder = typeMap.computeIfAbsent(typeId, k ->
+                    vn.eventplatform.ticket.dto.TicketStatisticsResponse.TicketTypeStatisticsResponse.builder()
+                            .ticketTypeId(typeId)
+                            .ticketTypeName(p.getTicketTypeName() != null ? p.getTicketTypeName() : "Mặc định")
+            );
+            long count = p.getCount() != null ? p.getCount() : 0L;
+            if (p.getStatus() == TicketStatus.SOLD) {
+                builder.totalSold(count);
+            } else if (p.getStatus() == TicketStatus.USED) {
+                builder.totalCheckedIn(count);
+            } else if (p.getStatus() == TicketStatus.CANCELLED) {
+                builder.totalCancelled(count);
+            }
+        }
+
+        List<vn.eventplatform.ticket.dto.TicketStatisticsResponse.TicketTypeStatisticsResponse> byTicketType =
+                typeMap.values().stream()
+                        .map(b -> {
+                            var built = b.build();
+                            long issued = built.getTotalSold() + built.getTotalCheckedIn() + built.getTotalCancelled();
+                            long active = built.getTotalSold() + built.getTotalCheckedIn();
+                            double rate = active > 0
+                                    ? Math.round((built.getTotalCheckedIn() * 100.0 / active) * 100.0) / 100.0
+                                    : 0.0;
+                            return built.toBuilder().totalIssued(issued).checkInRate(rate).build();
+                        })
+                        .toList();
+
+        // Thống kê theo phương thức check-in và thời điểm check-in gần nhất
+        java.util.Map<vn.eventplatform.ticket.domain.CheckInMethod, Long> checkInByMethod =
+                new java.util.EnumMap<>(vn.eventplatform.ticket.domain.CheckInMethod.class);
+        java.time.Instant lastCheckedInAt = null;
+
+        if (checkInRepository != null) {
+            List<vn.eventplatform.ticket.repository.projection.MethodCountProjection> methodCounts =
+                    checkInRepository.countByMethod(eventId, showTimeId);
+            for (var mc : methodCounts) {
+                if (mc.getMethod() != null) {
+                    checkInByMethod.put(mc.getMethod(), mc.getCount() != null ? mc.getCount() : 0L);
+                }
+            }
+            lastCheckedInAt = checkInRepository.findLastCheckedInAt(eventId, showTimeId).orElse(null);
+        }
+
+        return vn.eventplatform.ticket.dto.TicketStatisticsResponse.builder()
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .totalIssued(totalIssued)
+                .totalSold(totalSold)
+                .totalCheckedIn(totalCheckedIn)
+                .totalCancelled(totalCancelled)
+                .checkInRate(checkInRate)
+                .lastCheckedInAt(lastCheckedInAt)
+                .checkInByMethod(checkInByMethod)
+                .byTicketType(byTicketType)
+                .build();
     }
 }

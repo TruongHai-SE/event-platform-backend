@@ -28,6 +28,8 @@ import vn.eventplatform.ticket.mapper.TicketMapper;
 import vn.eventplatform.ticket.mapper.TicketMapperImpl;
 import vn.eventplatform.ticket.repository.TicketRepository;
 
+import java.time.Instant;
+
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -55,6 +57,9 @@ class TicketWalletAndDetailSecurityTest {
     @Mock
     private OrderServiceClient orderServiceClient;
 
+    @Mock
+    private vn.eventplatform.ticket.repository.CheckInRepository checkInRepository;
+
     @InjectMocks
     private TicketServiceImpl ticketService;
 
@@ -69,6 +74,7 @@ class TicketWalletAndDetailSecurityTest {
     void setUp() {
         ReflectionTestUtils.setField(ticketMapper, "checkInMapper", new CheckInMapperImpl());
         ReflectionTestUtils.setField(ticketService, "orderServiceClient", orderServiceClient);
+        ReflectionTestUtils.setField(ticketService, "checkInRepository", checkInRepository);
         ReflectionTestUtils.setField(ticketService, "internalSecret", "test-internal-secret");
     }
 
@@ -315,5 +321,85 @@ class TicketWalletAndDetailSecurityTest {
         assertThat(responses.getTotalElements()).isEqualTo(1);
         assertThat(responses.getContent().getFirst().getTicketTypeName()).isEqualTo("VIP");
         assertThat(responses.getContent().getFirst().getSeatNumber()).isEqualTo("A-01");
+    }
+
+    @Test
+    @DisplayName("12. getTicketStatistics: Thống kê realtime vé đã bán, đã check-in, đã hủy và tỷ lệ check-in")
+    void testGetTicketStatistics_Success() {
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        UUID ticketTypeId = UUID.randomUUID();
+
+        vn.eventplatform.ticket.repository.projection.StatusCountProjection soldProj =
+                new vn.eventplatform.ticket.repository.projection.StatusCountProjection() {
+                    @Override
+                    public TicketStatus getStatus() { return TicketStatus.SOLD; }
+                    @Override
+                    public Long getCount() { return 20L; }
+                };
+        vn.eventplatform.ticket.repository.projection.StatusCountProjection usedProj =
+                new vn.eventplatform.ticket.repository.projection.StatusCountProjection() {
+                    @Override
+                    public TicketStatus getStatus() { return TicketStatus.USED; }
+                    @Override
+                    public Long getCount() { return 80L; }
+                };
+        vn.eventplatform.ticket.repository.projection.StatusCountProjection cancelledProj =
+                new vn.eventplatform.ticket.repository.projection.StatusCountProjection() {
+                    @Override
+                    public TicketStatus getStatus() { return TicketStatus.CANCELLED; }
+                    @Override
+                    public Long getCount() { return 5L; }
+                };
+
+        when(ticketRepository.countByStatus(eventId, showTimeId))
+                .thenReturn(List.of(soldProj, usedProj, cancelledProj));
+
+        vn.eventplatform.ticket.repository.projection.TicketTypeStatusCountProjection typeProj =
+                new vn.eventplatform.ticket.repository.projection.TicketTypeStatusCountProjection() {
+                    @Override
+                    public UUID getTicketTypeId() { return ticketTypeId; }
+                    @Override
+                    public String getTicketTypeName() { return "VIP Diamond"; }
+                    @Override
+                    public TicketStatus getStatus() { return TicketStatus.USED; }
+                    @Override
+                    public Long getCount() { return 80L; }
+                };
+
+        when(ticketRepository.countByTicketTypeAndStatus(eventId, showTimeId))
+                .thenReturn(List.of(typeProj));
+
+        vn.eventplatform.ticket.repository.projection.MethodCountProjection methodProj =
+                new vn.eventplatform.ticket.repository.projection.MethodCountProjection() {
+                    @Override
+                    public vn.eventplatform.ticket.domain.CheckInMethod getMethod() {
+                        return vn.eventplatform.ticket.domain.CheckInMethod.QR_SCAN;
+                    }
+                    @Override
+                    public Long getCount() { return 80L; }
+                };
+
+        Instant now = Instant.now();
+        when(checkInRepository.countByMethod(eventId, showTimeId)).thenReturn(List.of(methodProj));
+        when(checkInRepository.findLastCheckedInAt(eventId, showTimeId)).thenReturn(Optional.of(now));
+
+        vn.eventplatform.ticket.dto.TicketStatisticsResponse stats =
+                ticketService.getTicketStatistics(eventId, showTimeId);
+
+        assertThat(stats).isNotNull();
+        assertThat(stats.getEventId()).isEqualTo(eventId);
+        assertThat(stats.getShowTimeId()).isEqualTo(showTimeId);
+        assertThat(stats.getTotalIssued()).isEqualTo(105L);
+        assertThat(stats.getTotalSold()).isEqualTo(20L);
+        assertThat(stats.getTotalCheckedIn()).isEqualTo(80L);
+        assertThat(stats.getTotalCancelled()).isEqualTo(5L);
+        // checkInRate = 80 / (20 + 80) * 100 = 80.0%
+        assertThat(stats.getCheckInRate()).isEqualTo(80.0);
+        assertThat(stats.getLastCheckedInAt()).isEqualTo(now);
+        assertThat(stats.getCheckInByMethod().get(vn.eventplatform.ticket.domain.CheckInMethod.QR_SCAN)).isEqualTo(80L);
+        assertThat(stats.getByTicketType()).hasSize(1);
+        assertThat(stats.getByTicketType().getFirst().getTicketTypeName()).isEqualTo("VIP Diamond");
+        assertThat(stats.getByTicketType().getFirst().getTotalCheckedIn()).isEqualTo(80L);
     }
 }

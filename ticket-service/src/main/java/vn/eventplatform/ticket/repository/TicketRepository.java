@@ -57,4 +57,24 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID>, JpaSpecif
     @org.springframework.data.jpa.repository.Modifying
     @Query("UPDATE Ticket t SET t.status = :newStatus WHERE t.showTimeId = :showTimeId AND t.status != :newStatus")
     int cancelTicketsByShowTimeId(@Param("showTimeId") UUID showTimeId, @Param("newStatus") TicketStatus newStatus);
+
+    @Query("SELECT t.status as status, COUNT(t) as count " +
+           "FROM Ticket t " +
+           "WHERE (:eventId IS NULL OR t.eventId = :eventId) " +
+           "  AND (:showTimeId IS NULL OR t.showTimeId = :showTimeId) " +
+           "GROUP BY t.status")
+    List<vn.eventplatform.ticket.repository.projection.StatusCountProjection> countByStatus(
+            @Param("eventId") UUID eventId,
+            @Param("showTimeId") UUID showTimeId
+    );
+
+    @Query("SELECT t.ticketTypeId as ticketTypeId, t.ticketTypeName as ticketTypeName, t.status as status, COUNT(t) as count " +
+           "FROM Ticket t " +
+           "WHERE (:eventId IS NULL OR t.eventId = :eventId) " +
+           "  AND (:showTimeId IS NULL OR t.showTimeId = :showTimeId) " +
+           "GROUP BY t.ticketTypeId, t.ticketTypeName, t.status")
+    List<vn.eventplatform.ticket.repository.projection.TicketTypeStatusCountProjection> countByTicketTypeAndStatus(
+            @Param("eventId") UUID eventId,
+            @Param("showTimeId") UUID showTimeId
+    );
 }

@@ -19,7 +19,6 @@ public class CheckInRequest {
 
     private UUID ticketId;
 
-    @NotNull(message = "staffId không được để trống")
     private UUID staffId;
 
     private UUID eventId;
