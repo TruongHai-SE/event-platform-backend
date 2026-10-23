@@ -22,6 +22,8 @@ import vn.eventplatform.ticket.domain.TicketStatus;
 import vn.eventplatform.ticket.dto.TicketFilterRequest;
 import vn.eventplatform.ticket.dto.TicketResponse;
 import vn.eventplatform.ticket.service.TicketService;
+import vn.eventplatform.ticket.service.TicketStatisticsSseService;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -34,6 +36,7 @@ import java.util.UUID;
 public class TicketController {
 
     private final TicketService ticketService;
+    private final TicketStatisticsSseService ticketStatisticsSseService;
 
     @Operation(summary = "Quản lý vé dành cho Admin, Staff, Organizer: Tra cứu, tìm kiếm và lọc danh sách vé")
     @GetMapping
@@ -168,6 +171,17 @@ public class TicketController {
     ) {
         vn.eventplatform.ticket.dto.TicketStatisticsResponse data = ticketService.getTicketStatistics(eventId, showTimeId);
         return ResponseEntity.ok(ApiResponse.ok(data));
+    }
+
+    @Operation(summary = "Realtime stream thống kê vé qua Server-Sent Events (SSE)",
+               description = "Đẩy dữ liệu thống kê realtime tới client qua SSE stream khi có lượt check-in mới")
+    @GetMapping(value = "/statistics/stream", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
+    @PreAuthorize("hasAnyRole('STAFF', 'ORGANIZER', 'ADMIN')")
+    public SseEmitter streamTicketStatistics(
+            @RequestParam(value = "eventId", required = false) UUID eventId,
+            @RequestParam(value = "showTimeId", required = false) UUID showTimeId
+    ) {
+        return ticketStatisticsSseService.subscribe(eventId, showTimeId);
     }
 
     private boolean checkAdminOrStaff(Authentication authentication) {
