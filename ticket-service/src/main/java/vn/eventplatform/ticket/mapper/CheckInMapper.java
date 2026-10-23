@@ -15,6 +15,9 @@ public interface CheckInMapper {
 
     @Mapping(target = "ticketId", source = "ticket.id")
     @Mapping(target = "seatNumber", source = "ticket.seatNumber")
+    @Mapping(target = "eventId", source = "ticket.eventId")
+    @Mapping(target = "showTimeId", source = "ticket.showTimeId")
+    @Mapping(target = "ticketTypeName", source = "ticket.ticketTypeName")
     CheckInResponse toResponse(CheckIn checkIn);
 
     @Mapping(target = "id", ignore = true)

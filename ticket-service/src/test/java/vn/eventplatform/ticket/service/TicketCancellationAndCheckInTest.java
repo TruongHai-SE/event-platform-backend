@@ -281,4 +281,285 @@ class TicketCancellationAndCheckInTest {
 
         verify(checkInRepository, never()).save(any());
     }
+
+    @Test
+    @DisplayName("Từ chối check-in khi quét vé sai sự kiện (eventId không khớp)")
+    void shouldRejectCheckInWhenEventIdDoesNotMatch() {
+        UUID ticketId = UUID.randomUUID();
+        UUID actualEventId = UUID.randomUUID();
+        UUID requestedEventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        String qrPayload = "qr-wrong-event";
+        UUID staffId = UUID.randomUUID();
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(qrPayload)
+                .eventId(actualEventId)
+                .showTimeId(showTimeId)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        when(ticketRepository.findByQrPayloadWithCheckIn(qrPayload)).thenReturn(Optional.of(ticket));
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(qrPayload)
+                .staffId(staffId)
+                .eventId(requestedEventId)
+                .showTimeId(showTimeId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Vé không thuộc sự kiện này");
+                });
+
+        verify(checkInRepository, never()).save(any());
+        assertThat(ticket.getStatus()).isEqualTo(TicketStatus.SOLD);
+    }
+
+    @Test
+    @DisplayName("Từ chối check-in khi quét vé sai suất diễn (showTimeId không khớp)")
+    void shouldRejectCheckInWhenShowTimeIdDoesNotMatch() {
+        UUID ticketId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID actualShowTimeId = UUID.randomUUID();
+        UUID requestedShowTimeId = UUID.randomUUID();
+        String qrPayload = "qr-wrong-showtime";
+        UUID staffId = UUID.randomUUID();
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(qrPayload)
+                .eventId(eventId)
+                .showTimeId(actualShowTimeId)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        when(ticketRepository.findByQrPayloadWithCheckIn(qrPayload)).thenReturn(Optional.of(ticket));
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(qrPayload)
+                .staffId(staffId)
+                .eventId(eventId)
+                .showTimeId(requestedShowTimeId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Vé không thuộc suất diễn này");
+                });
+
+        verify(checkInRepository, never()).save(any());
+        assertThat(ticket.getStatus()).isEqualTo(TicketStatus.SOLD);
+    }
+
+    @Test
+    @DisplayName("Từ chối check-in khi mã QR JWT bị can thiệp sai thông tin eventId")
+    void shouldRejectCheckInWhenQrPayloadEventIdMismatchesTicketEntity() {
+        UUID ticketId = UUID.randomUUID();
+        UUID actualEventId = UUID.randomUUID();
+        UUID forgedEventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        String jwtQr = "jwt.forged-event.token";
+        UUID staffId = UUID.randomUUID();
+
+        vn.eventplatform.ticket.dto.TicketQrPayloadDto payloadDto = vn.eventplatform.ticket.dto.TicketQrPayloadDto.builder()
+                .ticketId(ticketId)
+                .eventId(forgedEventId)
+                .showTimeId(showTimeId)
+                .build();
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(jwtQr)
+                .eventId(actualEventId)
+                .showTimeId(showTimeId)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        when(ticketQrPayloadService.verifyAndParsePayload(jwtQr)).thenReturn(payloadDto);
+        when(ticketRepository.findByIdWithCheckIn(ticketId)).thenReturn(Optional.of(ticket));
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(jwtQr)
+                .staffId(staffId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Mã QR không khớp thông tin sự kiện của vé");
+                });
+
+        verify(checkInRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Từ chối check-in khi mã QR JWT bị can thiệp sai thông tin showTimeId")
+    void shouldRejectCheckInWhenQrPayloadShowTimeIdMismatchesTicketEntity() {
+        UUID ticketId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID actualShowTimeId = UUID.randomUUID();
+        UUID forgedShowTimeId = UUID.randomUUID();
+        String jwtQr = "jwt.forged-showtime.token";
+        UUID staffId = UUID.randomUUID();
+
+        vn.eventplatform.ticket.dto.TicketQrPayloadDto payloadDto = vn.eventplatform.ticket.dto.TicketQrPayloadDto.builder()
+                .ticketId(ticketId)
+                .eventId(eventId)
+                .showTimeId(forgedShowTimeId)
+                .build();
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(jwtQr)
+                .eventId(eventId)
+                .showTimeId(actualShowTimeId)
+                .status(TicketStatus.SOLD)
+                .build();
+
+        when(ticketQrPayloadService.verifyAndParsePayload(jwtQr)).thenReturn(payloadDto);
+        when(ticketRepository.findByIdWithCheckIn(ticketId)).thenReturn(Optional.of(ticket));
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(jwtQr)
+                .staffId(staffId)
+                .build();
+
+        assertThatThrownBy(() -> checkInService.processCheckIn(request))
+                .isInstanceOf(AppException.class)
+                .satisfies(ex -> {
+                    AppException appEx = (AppException) ex;
+                    assertThat(appEx.getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST);
+                    assertThat(appEx.getMessage()).contains("Mã QR không khớp thông tin suất diễn của vé");
+                });
+
+        verify(checkInRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Check-in thành công khi đúng eventId và đúng showTimeId")
+    void shouldCheckInSuccessfullyWhenEventAndShowTimeMatch() {
+        UUID ticketId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        String jwtQr = "jwt.valid.token";
+        UUID staffId = UUID.randomUUID();
+
+        vn.eventplatform.ticket.dto.TicketQrPayloadDto payloadDto = vn.eventplatform.ticket.dto.TicketQrPayloadDto.builder()
+                .ticketId(ticketId)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .ticketTypeName("VIP")
+                .build();
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(jwtQr)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .ticketTypeName("VIP")
+                .seatNumber("VIP-01")
+                .status(TicketStatus.SOLD)
+                .build();
+
+        CheckIn savedCheckIn = CheckIn.builder()
+                .id(UUID.randomUUID())
+                .ticket(ticket)
+                .staffId(staffId)
+                .method(CheckInMethod.QR_SCAN)
+                .checkedInAt(Instant.now())
+                .build();
+
+        CheckInResponse expectedResponse = CheckInResponse.builder()
+                .id(savedCheckIn.getId())
+                .ticketId(ticketId)
+                .staffId(staffId)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .ticketTypeName("VIP")
+                .seatNumber("VIP-01")
+                .method(CheckInMethod.QR_SCAN)
+                .build();
+
+        when(ticketQrPayloadService.verifyAndParsePayload(jwtQr)).thenReturn(payloadDto);
+        when(ticketRepository.findByIdWithCheckIn(ticketId)).thenReturn(Optional.of(ticket));
+        when(checkInRepository.existsByTicketId(ticketId)).thenReturn(false);
+        when(checkInMapper.toEntity(ticket, staffId, CheckInMethod.QR_SCAN)).thenReturn(savedCheckIn);
+        when(checkInRepository.save(savedCheckIn)).thenReturn(savedCheckIn);
+        when(checkInMapper.toResponse(savedCheckIn)).thenReturn(expectedResponse);
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(jwtQr)
+                .staffId(staffId)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .build();
+
+        CheckInResponse response = checkInService.processCheckIn(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getEventId()).isEqualTo(eventId);
+        assertThat(response.getShowTimeId()).isEqualTo(showTimeId);
+        assertThat(ticket.getStatus()).isEqualTo(TicketStatus.USED);
+        verify(ticketRepository).save(ticket);
+        verify(checkInRepository).save(savedCheckIn);
+    }
+
+    @Test
+    @DisplayName("validateTicket: Xác thực thông tin vé thành công mà không chuyển trạng thái sang USED")
+    void shouldValidateTicketSuccessfullyWithoutChangingStatus() {
+        UUID ticketId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        UUID showTimeId = UUID.randomUUID();
+        String jwtQr = "jwt.valid.token";
+
+        vn.eventplatform.ticket.dto.TicketQrPayloadDto payloadDto = vn.eventplatform.ticket.dto.TicketQrPayloadDto.builder()
+                .ticketId(ticketId)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .ticketTypeName("STANDARD")
+                .build();
+
+        Ticket ticket = Ticket.builder()
+                .id(ticketId)
+                .qrPayload(jwtQr)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .ticketTypeName("STANDARD")
+                .seatNumber("B-05")
+                .status(TicketStatus.SOLD)
+                .build();
+
+        when(ticketQrPayloadService.verifyAndParsePayload(jwtQr)).thenReturn(payloadDto);
+        when(ticketRepository.findByIdWithCheckIn(ticketId)).thenReturn(Optional.of(ticket));
+        when(checkInRepository.existsByTicketId(ticketId)).thenReturn(false);
+
+        CheckInRequest request = CheckInRequest.builder()
+                .qrPayload(jwtQr)
+                .eventId(eventId)
+                .showTimeId(showTimeId)
+                .build();
+
+        vn.eventplatform.ticket.dto.TicketResponse response = checkInService.validateTicket(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getId()).isEqualTo(ticketId);
+        assertThat(response.getEventId()).isEqualTo(eventId);
+        assertThat(response.getShowTimeId()).isEqualTo(showTimeId);
+        assertThat(response.getSeatNumber()).isEqualTo("B-05");
+        // Quan trọng: Trạng thái vé không bị đổi sang USED và không lưu vào check_ins
+        assertThat(ticket.getStatus()).isEqualTo(TicketStatus.SOLD);
+        verify(ticketRepository, never()).save(ticket);
+        verify(checkInRepository, never()).save(any());
+    }
 }
