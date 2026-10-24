@@ -108,7 +108,7 @@ public class PaymentController {
     }
 
     @PostMapping("/refund")
-    @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
+    @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Tạo yêu cầu hoàn tiền cho giao dịch thanh toán")
     public ResponseEntity<ApiResponse<RefundResponse>> createRefund(
             @Valid @RequestBody CreateRefundRequest request
@@ -118,7 +118,7 @@ public class PaymentController {
     }
 
     @PostMapping("/refunds/{refundLogId}/confirm")
-    @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
+    @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Xác nhận hoàn tiền thủ công qua ngân hàng (chuyển MANUAL_BANK/PROCESSING sang SUCCESS)")
     public ResponseEntity<ApiResponse<RefundResponse>> confirmManualRefund(
             @PathVariable UUID refundLogId,
@@ -129,7 +129,7 @@ public class PaymentController {
     }
 
     @GetMapping("/refunds/payment/{paymentId}")
-    @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
+    @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Xem lịch sử hoàn tiền của giao dịch thanh toán")
     public ResponseEntity<ApiResponse<List<RefundResponse>>> getRefundsByPaymentId(@PathVariable UUID paymentId) {
         List<RefundResponse> responses = paymentService.getRefundsByPaymentId(paymentId);
