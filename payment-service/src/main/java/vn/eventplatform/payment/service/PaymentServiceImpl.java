@@ -35,11 +35,14 @@ import vn.eventplatform.payment.dto.sepay.SepayWebhookRequest;
 import vn.eventplatform.payment.dto.sepay.SepayWebhookResponse;
 import vn.eventplatform.payment.payment.sepay.config.SePayProperties;
 import vn.eventplatform.payment.payment.vnpay.config.VnPayProperties;
+import vn.eventplatform.payment.config.BatchRefundProperties;
+import vn.eventplatform.payment.util.SimpleRateLimiter;
 
 import java.math.BigDecimal;
 import java.net.URI;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -75,6 +78,13 @@ public class PaymentServiceImpl implements PaymentService {
 
     public void setMockRefundEnabled(boolean mockRefundEnabled) {
         this.mockRefundEnabled = mockRefundEnabled;
+    }
+
+    @Autowired(required = false)
+    private BatchRefundProperties batchRefundProperties = new BatchRefundProperties();
+
+    public void setBatchRefundProperties(BatchRefundProperties batchRefundProperties) {
+        this.batchRefundProperties = batchRefundProperties;
     }
 
     @Override
@@ -794,6 +804,193 @@ public class PaymentServiceImpl implements PaymentService {
     public List<RefundResponse> getRefundsByPaymentId(UUID paymentId) {
         List<RefundLog> logs = refundLogRepository.findByPaymentId(paymentId);
         return refundLogMapper.toResponseList(logs);
+    }
+
+    @Override
+    public BatchRefundResponse batchRefund(BatchRefundRequest request) {
+        if (request == null || request.getRequests() == null || request.getRequests().isEmpty()) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Danh sách yêu cầu hoàn tiền không được để trống");
+        }
+
+        int chunkSize = request.getChunkSize() != null && request.getChunkSize() > 0
+                ? request.getChunkSize()
+                : (batchRefundProperties != null ? batchRefundProperties.getDefaultChunkSize() : 50);
+
+        double requestsPerSecond = request.getRequestsPerSecond() != null && request.getRequestsPerSecond() > 0
+                ? request.getRequestsPerSecond()
+                : (batchRefundProperties != null ? batchRefundProperties.getDefaultRequestsPerSecond() : 10.0);
+
+        long delayBetweenChunksMs = batchRefundProperties != null
+                ? batchRefundProperties.getDelayBetweenChunksMs()
+                : 50L;
+
+        List<CreateRefundRequest> allRequests = request.getRequests();
+        int totalRequested = allRequests.size();
+        log.info("Bắt đầu xử lý hoàn tiền hàng loạt: totalRequests={}, chunkSize={}, requestsPerSecond={}",
+                totalRequested, chunkSize, requestsPerSecond);
+
+        SimpleRateLimiter rateLimiter = new SimpleRateLimiter(requestsPerSecond);
+        List<BatchRefundItemResult> results = new ArrayList<>(totalRequested);
+        int totalSuccess = 0;
+        int totalFailed = 0;
+        BigDecimal totalRefundedAmount = BigDecimal.ZERO;
+
+        for (int i = 0; i < totalRequested; i += chunkSize) {
+            int toIndex = Math.min(i + chunkSize, totalRequested);
+            List<CreateRefundRequest> chunk = allRequests.subList(i, toIndex);
+            log.info("Đang xử lý chunk hoàn tiền [{}/{}]: {} items",
+                    (i / chunkSize) + 1, (int) Math.ceil((double) totalRequested / chunkSize), chunk.size());
+
+            for (CreateRefundRequest req : chunk) {
+                rateLimiter.acquire();
+                try {
+                    RefundResponse refundResp = createRefund(req);
+                    boolean isSuccess = refundResp.getStatus() == RefundStatus.SUCCESS;
+                    if (isSuccess) {
+                        totalSuccess++;
+                        totalRefundedAmount = totalRefundedAmount.add(
+                                refundResp.getAmount() != null ? refundResp.getAmount() : BigDecimal.ZERO);
+                    } else {
+                        // Trạng thái PROCESSING hoặc MANUAL_BANK (đã ghi nhận thành công)
+                        totalSuccess++;
+                    }
+                    results.add(BatchRefundItemResult.builder()
+                            .refundLogId(refundResp.getId())
+                            .paymentId(refundResp.getPaymentId())
+                            .orderId(refundResp.getOrderId())
+                            .amount(refundResp.getAmount())
+                            .status(refundResp.getStatus())
+                            .gatewayRefundId(refundResp.getGatewayRefundId())
+                            .message("Xử lý hoàn tiền thành công")
+                            .refundedAt(refundResp.getRefundedAt())
+                            .build());
+                } catch (Exception e) {
+                    log.error("Lỗi khi hoàn tiền cho paymentId={}: {}", req.getPaymentId(), e.getMessage());
+                    totalFailed++;
+                    results.add(BatchRefundItemResult.builder()
+                            .paymentId(req.getPaymentId())
+                            .amount(req.getAmount())
+                            .status(RefundStatus.FAILED)
+                            .message(e.getMessage() != null ? e.getMessage() : "Lỗi hệ thống khi hoàn tiền")
+                            .build());
+                }
+            }
+
+            if (toIndex < totalRequested && delayBetweenChunksMs > 0) {
+                try {
+                    Thread.sleep(delayBetweenChunksMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Ngắt quãng khi nghỉ giữa các chunk", ie);
+                }
+            }
+        }
+
+        log.info("Hoàn tất xử lý hoàn tiền hàng loạt: total={}, success={}, failed={}, totalAmount={}",
+                totalRequested, totalSuccess, totalFailed, totalRefundedAmount);
+
+        return BatchRefundResponse.builder()
+                .totalRequested(totalRequested)
+                .totalSuccess(totalSuccess)
+                .totalFailed(totalFailed)
+                .totalRefundedAmount(totalRefundedAmount)
+                .chunkSize(chunkSize)
+                .requestsPerSecond(requestsPerSecond)
+                .results(results)
+                .build();
+    }
+
+    @Override
+    public BatchRefundResponse batchRefundByOrders(BatchRefundByOrdersRequest request) {
+        if (request == null || request.getRequests() == null || request.getRequests().isEmpty()) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Danh sách đơn hàng cần hoàn tiền không được để trống");
+        }
+
+        int chunkSize = request.getChunkSize() != null && request.getChunkSize() > 0
+                ? request.getChunkSize()
+                : (batchRefundProperties != null ? batchRefundProperties.getDefaultChunkSize() : 50);
+
+        double requestsPerSecond = request.getRequestsPerSecond() != null && request.getRequestsPerSecond() > 0
+                ? request.getRequestsPerSecond()
+                : (batchRefundProperties != null ? batchRefundProperties.getDefaultRequestsPerSecond() : 10.0);
+
+        long delayBetweenChunksMs = batchRefundProperties != null
+                ? batchRefundProperties.getDelayBetweenChunksMs()
+                : 50L;
+
+        List<InternalRefundOrderRequest> allRequests = request.getRequests();
+        int totalRequested = allRequests.size();
+        log.info("Bắt đầu xử lý hoàn tiền hàng loạt theo đơn hàng: totalRequests={}, chunkSize={}, requestsPerSecond={}",
+                totalRequested, chunkSize, requestsPerSecond);
+
+        SimpleRateLimiter rateLimiter = new SimpleRateLimiter(requestsPerSecond);
+        List<BatchRefundItemResult> results = new ArrayList<>(totalRequested);
+        int totalSuccess = 0;
+        int totalFailed = 0;
+        BigDecimal totalRefundedAmount = BigDecimal.ZERO;
+
+        for (int i = 0; i < totalRequested; i += chunkSize) {
+            int toIndex = Math.min(i + chunkSize, totalRequested);
+            List<InternalRefundOrderRequest> chunk = allRequests.subList(i, toIndex);
+            log.info("Đang xử lý chunk đơn hàng [{}/{}]: {} items",
+                    (i / chunkSize) + 1, (int) Math.ceil((double) totalRequested / chunkSize), chunk.size());
+
+            for (InternalRefundOrderRequest req : chunk) {
+                rateLimiter.acquire();
+                try {
+                    RefundResponse refundResp = refundByOrder(req);
+                    boolean isSuccess = refundResp.getStatus() == RefundStatus.SUCCESS;
+                    if (isSuccess) {
+                        totalSuccess++;
+                        totalRefundedAmount = totalRefundedAmount.add(
+                                refundResp.getAmount() != null ? refundResp.getAmount() : BigDecimal.ZERO);
+                    } else {
+                        totalSuccess++;
+                    }
+                    results.add(BatchRefundItemResult.builder()
+                            .refundLogId(refundResp.getId())
+                            .paymentId(refundResp.getPaymentId())
+                            .orderId(refundResp.getOrderId())
+                            .amount(refundResp.getAmount())
+                            .status(refundResp.getStatus())
+                            .gatewayRefundId(refundResp.getGatewayRefundId())
+                            .message("Xử lý hoàn tiền thành công")
+                            .refundedAt(refundResp.getRefundedAt())
+                            .build());
+                } catch (Exception e) {
+                    log.error("Lỗi khi hoàn tiền cho orderId={}: {}", req.getOrderId(), e.getMessage());
+                    totalFailed++;
+                    results.add(BatchRefundItemResult.builder()
+                            .orderId(req.getOrderId())
+                            .amount(req.getAmount())
+                            .status(RefundStatus.FAILED)
+                            .message(e.getMessage() != null ? e.getMessage() : "Lỗi hệ thống khi hoàn tiền")
+                            .build());
+                }
+            }
+
+            if (toIndex < totalRequested && delayBetweenChunksMs > 0) {
+                try {
+                    Thread.sleep(delayBetweenChunksMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Ngắt quãng khi nghỉ giữa các chunk", ie);
+                }
+            }
+        }
+
+        log.info("Hoàn tất xử lý hoàn tiền hàng loạt theo đơn hàng: total={}, success={}, failed={}, totalAmount={}",
+                totalRequested, totalSuccess, totalFailed, totalRefundedAmount);
+
+        return BatchRefundResponse.builder()
+                .totalRequested(totalRequested)
+                .totalSuccess(totalSuccess)
+                .totalFailed(totalFailed)
+                .totalRefundedAmount(totalRefundedAmount)
+                .chunkSize(chunkSize)
+                .requestsPerSecond(requestsPerSecond)
+                .results(results)
+                .build();
     }
 
     @Value("${payment.scheduler.expiration-threshold-minutes:15}")

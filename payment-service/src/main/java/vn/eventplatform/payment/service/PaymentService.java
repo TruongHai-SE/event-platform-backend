@@ -39,5 +39,9 @@ public interface PaymentService {
 
     List<RefundResponse> getRefundsByPaymentId(UUID paymentId);
 
+    BatchRefundResponse batchRefund(BatchRefundRequest request);
+
+    BatchRefundResponse batchRefundByOrders(BatchRefundByOrdersRequest request);
+
     int cancelExpiredPendingPayments();
 }
