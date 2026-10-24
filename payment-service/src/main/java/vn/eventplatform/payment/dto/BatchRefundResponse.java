@@ -35,6 +35,12 @@ public class BatchRefundResponse {
     @Schema(description = "Tốc độ giới hạn requests/giây đã áp dụng")
     private double requestsPerSecond;
 
+    @Schema(description = "Số lần retry tối đa đã cấu hình")
+    private int maxRetries;
+
+    @Schema(description = "Thời gian timeout tối đa cho từng giao dịch (ms)")
+    private long itemTimeoutMs;
+
     @Builder.Default
     @Schema(description = "Chi tiết kết quả từng giao dịch")
     private List<BatchRefundItemResult> results = new ArrayList<>();

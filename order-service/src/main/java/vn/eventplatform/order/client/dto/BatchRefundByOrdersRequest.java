@@ -15,4 +15,6 @@ public class BatchRefundByOrdersRequest {
     private List<InternalRefundOrderRequest> requests;
     private Integer chunkSize;
     private Double requestsPerSecond;
+    private Integer maxRetries;
+    private Long itemTimeoutMs;
 }

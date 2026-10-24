@@ -22,4 +22,5 @@ public class BatchRefundItemResult {
     private String gatewayRefundId;
     private String message;
     private Instant refundedAt;
+    private int retryAttempts;
 }

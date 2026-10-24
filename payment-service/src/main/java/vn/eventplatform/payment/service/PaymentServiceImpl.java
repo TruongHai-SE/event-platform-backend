@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -643,17 +644,44 @@ public class PaymentServiceImpl implements PaymentService {
             throw new AppException(ErrorCode.BAD_REQUEST, "Chỉ có thể hoàn tiền cho giao dịch đã thanh toán thành công");
         }
 
+        RefundLog refundLog;
         if (request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank()) {
             var existingLog = refundLogRepository.findByIdempotencyKey(request.getIdempotencyKey());
             if (existingLog.isPresent()) {
-                log.info("Yêu cầu hoàn tiền đã tồn tại với idempotencyKey={}", request.getIdempotencyKey());
-                return refundLogMapper.toResponse(existingLog.get());
+                RefundLog logItem = existingLog.get();
+                if (logItem.getStatus() == RefundStatus.SUCCESS) {
+                    log.info("Yêu cầu hoàn tiền đã thành công trước đó với idempotencyKey={}", request.getIdempotencyKey());
+                    return refundLogMapper.toResponse(logItem);
+                }
+                // Nếu bản ghi trước đó chưa thành công, tái sử dụng để retry gọi cổng thanh toán
+                refundLog = logItem;
+                refundLog.setStatus(RefundStatus.PROCESSING);
+                refundLog.setAmount(request.getAmount());
+                refundLog.setReason(request.getReason());
+            } else {
+                refundLog = RefundLog.builder()
+                        .orderId(payment.getOrderId())
+                        .payment(payment)
+                        .amount(request.getAmount())
+                        .reason(request.getReason())
+                        .status(RefundStatus.PROCESSING)
+                        .idempotencyKey(request.getIdempotencyKey())
+                        .build();
             }
+        } else {
+            refundLog = RefundLog.builder()
+                    .orderId(payment.getOrderId())
+                    .payment(payment)
+                    .amount(request.getAmount())
+                    .reason(request.getReason())
+                    .status(RefundStatus.PROCESSING)
+                    .idempotencyKey(request.getIdempotencyKey())
+                    .build();
         }
 
         List<RefundLog> existingRefunds = refundLogRepository.findByPaymentId(payment.getId());
         BigDecimal totalRefunded = existingRefunds.stream()
-                .filter(r -> r.getStatus() == RefundStatus.SUCCESS)
+                .filter(r -> r.getStatus() == RefundStatus.SUCCESS && (refundLog.getId() == null || !r.getId().equals(refundLog.getId())))
                 .map(RefundLog::getAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
@@ -664,14 +692,6 @@ public class PaymentServiceImpl implements PaymentService {
                             requestedTotal, payment.getAmount(), totalRefunded));
         }
 
-        RefundLog refundLog = RefundLog.builder()
-                .orderId(payment.getOrderId())
-                .payment(payment)
-                .amount(request.getAmount())
-                .reason(request.getReason())
-                .status(RefundStatus.PROCESSING)
-                .idempotencyKey(request.getIdempotencyKey())
-                .build();
         RefundLog savedRefundLog = refundLogRepository.save(refundLog);
 
         RefundContext refundContext = RefundContext.builder()
@@ -824,10 +844,21 @@ public class PaymentServiceImpl implements PaymentService {
                 ? batchRefundProperties.getDelayBetweenChunksMs()
                 : 50L;
 
+        int maxRetries = request.getMaxRetries() != null && request.getMaxRetries() >= 0
+                ? request.getMaxRetries()
+                : (batchRefundProperties != null ? batchRefundProperties.getMaxRetries() : 3);
+
+        long itemTimeoutMs = request.getItemTimeoutMs() != null && request.getItemTimeoutMs() >= 0
+                ? request.getItemTimeoutMs()
+                : (batchRefundProperties != null ? batchRefundProperties.getItemTimeoutMs() : 5000L);
+
+        long initialBackoffMs = batchRefundProperties != null ? batchRefundProperties.getInitialBackoffMs() : 100L;
+        double backoffMultiplier = batchRefundProperties != null ? batchRefundProperties.getBackoffMultiplier() : 2.0;
+
         List<CreateRefundRequest> allRequests = request.getRequests();
         int totalRequested = allRequests.size();
-        log.info("Bắt đầu xử lý hoàn tiền hàng loạt: totalRequests={}, chunkSize={}, requestsPerSecond={}",
-                totalRequested, chunkSize, requestsPerSecond);
+        log.info("Bắt đầu xử lý hoàn tiền hàng loạt: totalRequests={}, chunkSize={}, requestsPerSecond={}, maxRetries={}, itemTimeoutMs={}",
+                totalRequested, chunkSize, requestsPerSecond, maxRetries, itemTimeoutMs);
 
         SimpleRateLimiter rateLimiter = new SimpleRateLimiter(requestsPerSecond);
         List<BatchRefundItemResult> results = new ArrayList<>(totalRequested);
@@ -842,9 +873,40 @@ public class PaymentServiceImpl implements PaymentService {
                     (i / chunkSize) + 1, (int) Math.ceil((double) totalRequested / chunkSize), chunk.size());
 
             for (CreateRefundRequest req : chunk) {
-                rateLimiter.acquire();
-                try {
-                    RefundResponse refundResp = createRefund(req);
+                RefundResponse refundResp = null;
+                Exception lastException = null;
+                int attempts = 0;
+
+                for (int attempt = 1; attempt <= 1 + maxRetries; attempt++) {
+                    attempts = attempt;
+                    rateLimiter.acquire();
+                    try {
+                        refundResp = executeWithTimeout(() -> createRefund(req), itemTimeoutMs);
+                        if (refundResp != null && refundResp.getStatus() == RefundStatus.FAILED) {
+                            if (attempt <= maxRetries) {
+                                long backoff = calculateBackoff(initialBackoffMs, backoffMultiplier, attempt);
+                                log.warn("Cổng thanh toán báo hoàn tiền thất bại cho paymentId={} (lần thử {}/{}), thử lại sau {}ms",
+                                        req.getPaymentId(), attempt, 1 + maxRetries, backoff);
+                                sleepBackoff(backoff);
+                                continue;
+                            }
+                        }
+                        lastException = null;
+                        break;
+                    } catch (Exception e) {
+                        lastException = e;
+                        if (isRetryableException(e) && attempt <= maxRetries) {
+                            long backoff = calculateBackoff(initialBackoffMs, backoffMultiplier, attempt);
+                            log.warn("Lỗi tạm thời khi hoàn tiền cho paymentId={} (lần thử {}/{}), thử lại sau {}ms: {}",
+                                    req.getPaymentId(), attempt, 1 + maxRetries, backoff, e.getMessage());
+                            sleepBackoff(backoff);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                if (refundResp != null && refundResp.getStatus() != RefundStatus.FAILED) {
                     boolean isSuccess = refundResp.getStatus() == RefundStatus.SUCCESS;
                     if (isSuccess) {
                         totalSuccess++;
@@ -863,15 +925,17 @@ public class PaymentServiceImpl implements PaymentService {
                             .gatewayRefundId(refundResp.getGatewayRefundId())
                             .message("Xử lý hoàn tiền thành công")
                             .refundedAt(refundResp.getRefundedAt())
+                            .retryAttempts(attempts - 1)
                             .build());
-                } catch (Exception e) {
-                    log.error("Lỗi khi hoàn tiền cho paymentId={}: {}", req.getPaymentId(), e.getMessage());
+                } else {
                     totalFailed++;
+                    String errMsg = lastException != null ? lastException.getMessage() : "Cổng thanh toán từ chối hoàn tiền";
                     results.add(BatchRefundItemResult.builder()
                             .paymentId(req.getPaymentId())
                             .amount(req.getAmount())
                             .status(RefundStatus.FAILED)
-                            .message(e.getMessage() != null ? e.getMessage() : "Lỗi hệ thống khi hoàn tiền")
+                            .message(errMsg)
+                            .retryAttempts(attempts - 1)
                             .build());
                 }
             }
@@ -896,6 +960,8 @@ public class PaymentServiceImpl implements PaymentService {
                 .totalRefundedAmount(totalRefundedAmount)
                 .chunkSize(chunkSize)
                 .requestsPerSecond(requestsPerSecond)
+                .maxRetries(maxRetries)
+                .itemTimeoutMs(itemTimeoutMs)
                 .results(results)
                 .build();
     }
@@ -918,10 +984,21 @@ public class PaymentServiceImpl implements PaymentService {
                 ? batchRefundProperties.getDelayBetweenChunksMs()
                 : 50L;
 
+        int maxRetries = request.getMaxRetries() != null && request.getMaxRetries() >= 0
+                ? request.getMaxRetries()
+                : (batchRefundProperties != null ? batchRefundProperties.getMaxRetries() : 3);
+
+        long itemTimeoutMs = request.getItemTimeoutMs() != null && request.getItemTimeoutMs() >= 0
+                ? request.getItemTimeoutMs()
+                : (batchRefundProperties != null ? batchRefundProperties.getItemTimeoutMs() : 5000L);
+
+        long initialBackoffMs = batchRefundProperties != null ? batchRefundProperties.getInitialBackoffMs() : 100L;
+        double backoffMultiplier = batchRefundProperties != null ? batchRefundProperties.getBackoffMultiplier() : 2.0;
+
         List<InternalRefundOrderRequest> allRequests = request.getRequests();
         int totalRequested = allRequests.size();
-        log.info("Bắt đầu xử lý hoàn tiền hàng loạt theo đơn hàng: totalRequests={}, chunkSize={}, requestsPerSecond={}",
-                totalRequested, chunkSize, requestsPerSecond);
+        log.info("Bắt đầu xử lý hoàn tiền hàng loạt theo đơn hàng: totalRequests={}, chunkSize={}, requestsPerSecond={}, maxRetries={}, itemTimeoutMs={}",
+                totalRequested, chunkSize, requestsPerSecond, maxRetries, itemTimeoutMs);
 
         SimpleRateLimiter rateLimiter = new SimpleRateLimiter(requestsPerSecond);
         List<BatchRefundItemResult> results = new ArrayList<>(totalRequested);
@@ -936,9 +1013,40 @@ public class PaymentServiceImpl implements PaymentService {
                     (i / chunkSize) + 1, (int) Math.ceil((double) totalRequested / chunkSize), chunk.size());
 
             for (InternalRefundOrderRequest req : chunk) {
-                rateLimiter.acquire();
-                try {
-                    RefundResponse refundResp = refundByOrder(req);
+                RefundResponse refundResp = null;
+                Exception lastException = null;
+                int attempts = 0;
+
+                for (int attempt = 1; attempt <= 1 + maxRetries; attempt++) {
+                    attempts = attempt;
+                    rateLimiter.acquire();
+                    try {
+                        refundResp = executeWithTimeout(() -> refundByOrder(req), itemTimeoutMs);
+                        if (refundResp != null && refundResp.getStatus() == RefundStatus.FAILED) {
+                            if (attempt <= maxRetries) {
+                                long backoff = calculateBackoff(initialBackoffMs, backoffMultiplier, attempt);
+                                log.warn("Cổng thanh toán báo hoàn tiền thất bại cho orderId={} (lần thử {}/{}), thử lại sau {}ms",
+                                        req.getOrderId(), attempt, 1 + maxRetries, backoff);
+                                sleepBackoff(backoff);
+                                continue;
+                            }
+                        }
+                        lastException = null;
+                        break;
+                    } catch (Exception e) {
+                        lastException = e;
+                        if (isRetryableException(e) && attempt <= maxRetries) {
+                            long backoff = calculateBackoff(initialBackoffMs, backoffMultiplier, attempt);
+                            log.warn("Lỗi tạm thời khi hoàn tiền cho orderId={} (lần thử {}/{}), thử lại sau {}ms: {}",
+                                    req.getOrderId(), attempt, 1 + maxRetries, backoff, e.getMessage());
+                            sleepBackoff(backoff);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                if (refundResp != null && refundResp.getStatus() != RefundStatus.FAILED) {
                     boolean isSuccess = refundResp.getStatus() == RefundStatus.SUCCESS;
                     if (isSuccess) {
                         totalSuccess++;
@@ -950,21 +1058,23 @@ public class PaymentServiceImpl implements PaymentService {
                     results.add(BatchRefundItemResult.builder()
                             .refundLogId(refundResp.getId())
                             .paymentId(refundResp.getPaymentId())
-                            .orderId(refundResp.getOrderId())
+                            .orderId(req.getOrderId())
                             .amount(refundResp.getAmount())
                             .status(refundResp.getStatus())
                             .gatewayRefundId(refundResp.getGatewayRefundId())
                             .message("Xử lý hoàn tiền thành công")
                             .refundedAt(refundResp.getRefundedAt())
+                            .retryAttempts(attempts - 1)
                             .build());
-                } catch (Exception e) {
-                    log.error("Lỗi khi hoàn tiền cho orderId={}: {}", req.getOrderId(), e.getMessage());
+                } else {
                     totalFailed++;
+                    String errMsg = lastException != null ? lastException.getMessage() : "Cổng thanh toán từ chối hoàn tiền";
                     results.add(BatchRefundItemResult.builder()
                             .orderId(req.getOrderId())
                             .amount(req.getAmount())
                             .status(RefundStatus.FAILED)
-                            .message(e.getMessage() != null ? e.getMessage() : "Lỗi hệ thống khi hoàn tiền")
+                            .message(errMsg)
+                            .retryAttempts(attempts - 1)
                             .build());
                 }
             }
@@ -989,8 +1099,86 @@ public class PaymentServiceImpl implements PaymentService {
                 .totalRefundedAmount(totalRefundedAmount)
                 .chunkSize(chunkSize)
                 .requestsPerSecond(requestsPerSecond)
+                .maxRetries(maxRetries)
+                .itemTimeoutMs(itemTimeoutMs)
                 .results(results)
                 .build();
+    }
+
+    private <T> T executeWithTimeout(Callable<T> task, long timeoutMs) throws Exception {
+        if (timeoutMs <= 0) {
+            return task.call();
+        }
+        CompletableFuture<T> future = CompletableFuture.supplyAsync(() -> {
+            try {
+                return task.call();
+            } catch (Exception e) {
+                if (e instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new CompletionException(e);
+            }
+        });
+
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            future.cancel(true);
+            throw new TimeoutException(String.format("Yêu cầu hoàn tiền bị timeout sau %d ms", timeoutMs));
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            if (cause instanceof CompletionException ce && ce.getCause() != null) {
+                cause = ce.getCause();
+            }
+            if (cause instanceof Exception ex) {
+                throw ex;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private boolean isRetryableException(Throwable t) {
+        Throwable curr = t;
+        while (curr != null) {
+            if (curr instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            if (curr instanceof AppException appEx) {
+                ErrorCode code = appEx.getErrorCode();
+                if (code == ErrorCode.NOT_FOUND
+                        || code == ErrorCode.BAD_REQUEST
+                        || code == ErrorCode.FORBIDDEN
+                        || code == ErrorCode.UNAUTHORIZED
+                        || code == ErrorCode.CONFLICT) {
+                    return false;
+                }
+                return true;
+            }
+            if (curr instanceof IllegalArgumentException || curr instanceof NullPointerException) {
+                return false;
+            }
+            if (curr instanceof TimeoutException || curr instanceof java.io.IOException) {
+                return true;
+            }
+            curr = curr.getCause();
+        }
+        return true;
+    }
+
+    private long calculateBackoff(long initialBackoffMs, double multiplier, int attempt) {
+        if (initialBackoffMs <= 0) return 0;
+        return (long) (initialBackoffMs * Math.pow(multiplier, attempt - 1));
+    }
+
+    private void sleepBackoff(long backoffMs) {
+        if (backoffMs <= 0) return;
+        try {
+            Thread.sleep(backoffMs);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("Ngắt quãng khi chờ backoff retry", ie);
+        }
     }
 
     @Value("${payment.scheduler.expiration-threshold-minutes:15}")

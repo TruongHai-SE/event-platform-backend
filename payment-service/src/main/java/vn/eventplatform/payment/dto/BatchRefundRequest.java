@@ -26,4 +26,10 @@ public class BatchRefundRequest {
 
     @Schema(description = "Tốc độ giới hạn request/giây (mặc định lấy theo cấu hình hệ thống)", example = "10.0")
     private Double requestsPerSecond;
+
+    @Schema(description = "Số lần retry tối đa khi gặp lỗi tạm thời (mặc định theo cấu hình hệ thống)", example = "3")
+    private Integer maxRetries;
+
+    @Schema(description = "Thời gian timeout tối đa cho từng giao dịch (milliseconds, mặc định theo cấu hình hệ thống)", example = "5000")
+    private Long itemTimeoutMs;
 }
