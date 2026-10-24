@@ -53,6 +53,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
@@ -1470,6 +1471,160 @@ class PaymentServiceTest {
         BatchRefundByOrdersRequest emptyRequest = BatchRefundByOrdersRequest.builder().requests(List.of()).build();
         assertThatThrownBy(() -> paymentService.batchRefundByOrders(emptyRequest))
                 .isInstanceOf(AppException.class);
+    }
+
+    @Test
+    @DisplayName("batchRefund: Lỗi tạm thời (transient error) được retry thành công ở lần thử tiếp theo")
+    void batchRefund_TransientFailure_RetriesAndSucceeds() {
+        BatchRefundProperties properties = new BatchRefundProperties();
+        properties.setDefaultChunkSize(10);
+        properties.setDefaultRequestsPerSecond(100.0);
+        properties.setMaxRetries(2);
+        properties.setInitialBackoffMs(1L);
+        properties.setItemTimeoutMs(2000L);
+        paymentService.setBatchRefundProperties(properties);
+
+        UUID pId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(pId)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        when(paymentRepository.findById(pId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(pId)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+
+        // Lần đầu ném ngoại lệ mạng (transient error), lần 2 trả về kết quả thành công
+        when(paymentStrategy.refund(any()))
+                .thenThrow(new RuntimeException("Gateway connection reset"))
+                .thenReturn(RefundResult.builder()
+                        .success(true)
+                        .status(RefundStatus.SUCCESS)
+                        .gatewayRefundId("GW-RETRY-SUCCESS")
+                        .refundedAt(Instant.now())
+                        .build());
+
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(inv -> {
+            RefundLog l = inv.getArgument(0);
+            return RefundResponse.builder()
+                    .id(l.getId())
+                    .paymentId(pId)
+                    .status(l.getStatus())
+                    .amount(l.getAmount())
+                    .gatewayRefundId(l.getGatewayRefundId())
+                    .refundedAt(l.getRefundedAt())
+                    .build();
+        });
+
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(CreateRefundRequest.builder()
+                        .paymentId(pId)
+                        .amount(new BigDecimal("100000.00"))
+                        .reason("Retry test")
+                        .build()))
+                .maxRetries(2)
+                .itemTimeoutMs(2000L)
+                .build();
+
+        BatchRefundResponse response = paymentService.batchRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTotalRequested()).isEqualTo(1);
+        assertThat(response.getTotalSuccess()).isEqualTo(1);
+        assertThat(response.getTotalFailed()).isEqualTo(0);
+        assertThat(response.getResults()).hasSize(1);
+
+        BatchRefundItemResult item = response.getResults().get(0);
+        assertThat(item.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(item.getRetryAttempts()).isEqualTo(1); // Đã retry 1 lần và thành công
+        verify(paymentStrategy, times(2)).refund(any());
+    }
+
+    @Test
+    @DisplayName("batchRefund: Lỗi nghiệp vụ không thể retry (NOT_FOUND) thất bại ngay lập tức mà không retry vô ích")
+    void batchRefund_NonRetryableFailure_FailsImmediatelyWithoutRetrying() {
+        BatchRefundProperties properties = new BatchRefundProperties();
+        properties.setDefaultChunkSize(10);
+        properties.setDefaultRequestsPerSecond(100.0);
+        properties.setMaxRetries(3);
+        properties.setInitialBackoffMs(1L);
+        paymentService.setBatchRefundProperties(properties);
+
+        UUID nonExistentPaymentId = UUID.randomUUID();
+        when(paymentRepository.findById(nonExistentPaymentId)).thenReturn(Optional.empty());
+
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(CreateRefundRequest.builder()
+                        .paymentId(nonExistentPaymentId)
+                        .amount(new BigDecimal("50000.00"))
+                        .reason("Non-retryable test")
+                        .build()))
+                .build();
+
+        BatchRefundResponse response = paymentService.batchRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTotalRequested()).isEqualTo(1);
+        assertThat(response.getTotalSuccess()).isEqualTo(0);
+        assertThat(response.getTotalFailed()).isEqualTo(1);
+
+        BatchRefundItemResult item = response.getResults().get(0);
+        assertThat(item.getStatus()).isEqualTo(RefundStatus.FAILED);
+        assertThat(item.getRetryAttempts()).isEqualTo(0); // Không retry
+        verify(paymentRepository, times(1)).findById(nonExistentPaymentId);
+    }
+
+    @Test
+    @DisplayName("batchRefund: Quá hạn timeout (itemTimeoutMs) kích hoạt ngoại lệ timeout và ghi nhận thất bại")
+    void batchRefund_Timeout_TriggersTimeoutAndFailsGracefully() {
+        BatchRefundProperties properties = new BatchRefundProperties();
+        properties.setDefaultChunkSize(10);
+        properties.setDefaultRequestsPerSecond(100.0);
+        properties.setMaxRetries(0); // Không retry để kiểm tra timeout trực tiếp
+        properties.setItemTimeoutMs(20L); // 20ms timeout
+        paymentService.setBatchRefundProperties(properties);
+
+        UUID pId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(pId)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        when(paymentRepository.findById(pId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(pId)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+
+        // Giả lập cổng thanh toán bị treo lâu hơn thời gian timeout (sleep 100ms > 20ms)
+        when(paymentStrategy.refund(any())).thenAnswer(inv -> {
+            Thread.sleep(100L);
+            return RefundResult.builder().status(RefundStatus.SUCCESS).build();
+        });
+
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(CreateRefundRequest.builder()
+                        .paymentId(pId)
+                        .amount(new BigDecimal("100000.00"))
+                        .reason("Timeout test")
+                        .build()))
+                .itemTimeoutMs(20L)
+                .maxRetries(0)
+                .build();
+
+        BatchRefundResponse response = paymentService.batchRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTotalSuccess()).isEqualTo(0);
+        assertThat(response.getTotalFailed()).isEqualTo(1);
+
+        BatchRefundItemResult item = response.getResults().get(0);
+        assertThat(item.getStatus()).isEqualTo(RefundStatus.FAILED);
+        assertThat(item.getMessage()).containsIgnoringCase("timeout");
     }
 }
 

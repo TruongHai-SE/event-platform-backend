@@ -20,6 +20,8 @@ public class BatchRefundResponse {
     private BigDecimal totalRefundedAmount;
     private int chunkSize;
     private double requestsPerSecond;
+    private int maxRetries;
+    private long itemTimeoutMs;
     @Builder.Default
     private List<BatchRefundItemResult> results = new ArrayList<>();
 }

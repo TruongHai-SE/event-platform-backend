@@ -41,4 +41,7 @@ public class BatchRefundItemResult {
 
     @Schema(description = "Thời điểm hoàn tiền thành công")
     private Instant refundedAt;
+
+    @Schema(description = "Số lần đã thử lại khi gặp lỗi tạm thời")
+    private int retryAttempts;
 }
