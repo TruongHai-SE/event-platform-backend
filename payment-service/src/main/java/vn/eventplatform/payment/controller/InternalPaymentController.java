@@ -50,6 +50,18 @@ public class InternalPaymentController {
         return ResponseEntity.ok(ApiResponse.ok("Xử lý yêu cầu hoàn tiền thành công", response));
     }
 
+    @PostMapping("/refunds/batch")
+    public ResponseEntity<ApiResponse<vn.eventplatform.payment.dto.BatchRefundResponse>> batchRefundByOrders(
+            @RequestHeader(value = "X-Internal-Secret", required = false) String secret,
+            @Valid @RequestBody vn.eventplatform.payment.dto.BatchRefundByOrdersRequest request
+    ) {
+        validateInternalSecret(secret);
+        log.info("Nhận yêu cầu hoàn tiền hàng loạt theo danh sách đơn hàng qua internal API: totalCount={}",
+                request.getRequests() != null ? request.getRequests().size() : 0);
+        vn.eventplatform.payment.dto.BatchRefundResponse response = paymentService.batchRefundByOrders(request);
+        return ResponseEntity.ok(ApiResponse.ok("Xử lý hoàn tiền hàng loạt hoàn tất", response));
+    }
+
     private void validateInternalSecret(String secret) {
         if (secret == null || !secret.equals(internalSecret)) {
             log.warn("Gọi InternalPaymentController với secret không hợp lệ!");

@@ -136,6 +136,17 @@ public class PaymentController {
         return ResponseEntity.ok(ApiResponse.ok(responses));
     }
 
+    @PostMapping("/refunds/batch")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Operation(summary = "Thực hiện hoàn tiền hàng loạt theo chunk và rate limit",
+            description = "Chia nhỏ danh sách yêu cầu hoàn tiền thành từng chunk và áp dụng rate limit điều tiết tải sang cổng thanh toán")
+    public ResponseEntity<ApiResponse<BatchRefundResponse>> batchRefund(
+            @Valid @RequestBody BatchRefundRequest request
+    ) {
+        BatchRefundResponse response = paymentService.batchRefund(request);
+        return ResponseEntity.ok(ApiResponse.ok("Xử lý hoàn tiền hàng loạt hoàn tất", response));
+    }
+
     private UUID extractUserId(Authentication authentication) {
         if (authentication == null || authentication.getName() == null) {
             return null;
