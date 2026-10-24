@@ -366,4 +366,97 @@ class PaymentControllerTest {
         mockMvc.perform(get("/api/v1/payments/refunds/payment/{paymentId}", paymentId))
                 .andExpect(status().isForbidden());
     }
+
+    @Test
+    @WithMockUser(roles = {"ADMIN"})
+    @DisplayName("POST /api/v1/payments/refunds/batch - Admin hoàn tiền hàng loạt thành công 200 OK")
+    void batchRefund_Admin_Success() throws Exception {
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(
+                        CreateRefundRequest.builder()
+                                .paymentId(UUID.randomUUID())
+                                .amount(new BigDecimal("100000.00"))
+                                .reason("Show cancelled")
+                                .idempotencyKey("IDEM-BATCH-001")
+                                .build()
+                ))
+                .chunkSize(10)
+                .requestsPerSecond(5.0)
+                .build();
+
+        BatchRefundResponse response = BatchRefundResponse.builder()
+                .totalRequested(1)
+                .totalSuccess(1)
+                .totalFailed(0)
+                .totalRefundedAmount(new BigDecimal("100000.00"))
+                .chunkSize(10)
+                .requestsPerSecond(5.0)
+                .results(List.of(
+                        BatchRefundItemResult.builder()
+                                .refundLogId(UUID.randomUUID())
+                                .paymentId(request.getRequests().get(0).getPaymentId())
+                                .amount(new BigDecimal("100000.00"))
+                                .status(RefundStatus.SUCCESS)
+                                .message("Xử lý hoàn tiền thành công")
+                                .build()
+                ))
+                .build();
+
+        when(paymentService.batchRefund(any(BatchRefundRequest.class))).thenReturn(response);
+
+        mockMvc.perform(post("/api/v1/payments/refunds/batch")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.totalRequested").value(1))
+                .andExpect(jsonPath("$.data.totalSuccess").value(1))
+                .andExpect(jsonPath("$.data.totalFailed").value(0))
+                .andExpect(jsonPath("$.data.totalRefundedAmount").value(100000.00));
+    }
+
+    @Test
+    @WithMockUser(roles = {"STAFF"})
+    @DisplayName("POST /api/v1/payments/refunds/batch - Staff bị từ chối 403 Forbidden")
+    void batchRefund_Staff_Forbidden() throws Exception {
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(
+                        CreateRefundRequest.builder()
+                                .paymentId(UUID.randomUUID())
+                                .amount(new BigDecimal("100000.00"))
+                                .reason("Staff batch refund attempt")
+                                .idempotencyKey("IDEM-STAFF-BATCH-001")
+                                .build()
+                ))
+                .build();
+
+        mockMvc.perform(post("/api/v1/payments/refunds/batch")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = {"USER"})
+    @DisplayName("POST /api/v1/payments/refunds/batch - User thường bị từ chối 403 Forbidden")
+    void batchRefund_User_Forbidden() throws Exception {
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(
+                        CreateRefundRequest.builder()
+                                .paymentId(UUID.randomUUID())
+                                .amount(new BigDecimal("100000.00"))
+                                .reason("User batch refund attempt")
+                                .idempotencyKey("IDEM-USER-BATCH-001")
+                                .build()
+                ))
+                .build();
+
+        mockMvc.perform(post("/api/v1/payments/refunds/batch")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isForbidden());
+    }
 }

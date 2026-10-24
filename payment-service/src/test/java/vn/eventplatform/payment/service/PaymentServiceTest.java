@@ -35,6 +35,11 @@ import vn.eventplatform.payment.dto.CreateRefundRequest;
 import vn.eventplatform.payment.dto.InternalRefundOrderRequest;
 import vn.eventplatform.payment.dto.RefundResponse;
 import vn.eventplatform.payment.payment.dto.RefundResult;
+import vn.eventplatform.payment.config.BatchRefundProperties;
+import vn.eventplatform.payment.dto.BatchRefundItemResult;
+import vn.eventplatform.payment.dto.BatchRefundRequest;
+import vn.eventplatform.payment.dto.BatchRefundResponse;
+import vn.eventplatform.payment.dto.BatchRefundByOrdersRequest;
 import java.util.Optional;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -1289,6 +1294,182 @@ class PaymentServiceTest {
         assertThat(refundLog.getStatus()).isEqualTo(RefundStatus.SUCCESS);
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
         verify(paymentRepository).save(payment);
+    }
+
+    @Test
+    @DisplayName("batchRefund: Xử lý chia chunk và rate limit thành công cho nhiều đơn hàng")
+    void batchRefund_Success_AcrossMultipleChunks() {
+        BatchRefundProperties properties = new BatchRefundProperties();
+        properties.setDefaultChunkSize(2);
+        properties.setDefaultRequestsPerSecond(100.0);
+        properties.setDelayBetweenChunksMs(0L);
+        paymentService.setBatchRefundProperties(properties);
+
+        UUID p1 = UUID.randomUUID();
+        UUID p2 = UUID.randomUUID();
+        UUID p3 = UUID.randomUUID();
+
+        Payment payment1 = Payment.builder().id(p1).amount(new BigDecimal("100000.00")).status(PaymentStatus.SUCCESS).method(PaymentGateway.VNPAY).build();
+        Payment payment2 = Payment.builder().id(p2).amount(new BigDecimal("200000.00")).status(PaymentStatus.SUCCESS).method(PaymentGateway.VNPAY).build();
+        Payment payment3 = Payment.builder().id(p3).amount(new BigDecimal("300000.00")).status(PaymentStatus.SUCCESS).method(PaymentGateway.VNPAY).build();
+
+        when(paymentRepository.findById(p1)).thenReturn(Optional.of(payment1));
+        when(paymentRepository.findById(p2)).thenReturn(Optional.of(payment2));
+        when(paymentRepository.findById(p3)).thenReturn(Optional.of(payment3));
+
+        when(refundLogRepository.findByPaymentId(any())).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .success(true)
+                .status(RefundStatus.SUCCESS)
+                .gatewayRefundId("GW-BATCH-REFUND")
+                .refundedAt(Instant.now())
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).paymentId(l.getPayment() != null ? l.getPayment().getId() : null).status(l.getStatus()).amount(l.getAmount()).build();
+        });
+
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(
+                        CreateRefundRequest.builder().paymentId(p1).amount(new BigDecimal("100000.00")).reason("C1").build(),
+                        CreateRefundRequest.builder().paymentId(p2).amount(new BigDecimal("200000.00")).reason("C2").build(),
+                        CreateRefundRequest.builder().paymentId(p3).amount(new BigDecimal("300000.00")).reason("C3").build()
+                ))
+                .chunkSize(2)
+                .requestsPerSecond(100.0)
+                .build();
+
+        BatchRefundResponse response = paymentService.batchRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTotalRequested()).isEqualTo(3);
+        assertThat(response.getTotalSuccess()).isEqualTo(3);
+        assertThat(response.getTotalFailed()).isEqualTo(0);
+        assertThat(response.getTotalRefundedAmount()).isEqualByComparingTo("600000.00");
+        assertThat(response.getResults()).hasSize(3);
+        assertThat(response.getResults().get(0).getStatus()).isEqualTo(RefundStatus.SUCCESS);
+    }
+
+    @Test
+    @DisplayName("batchRefund: Xử lý khi có item thất bại không làm dừng cả batch (Partial Failure)")
+    void batchRefund_PartialFailure() {
+        BatchRefundProperties properties = new BatchRefundProperties();
+        properties.setDefaultChunkSize(10);
+        properties.setDelayBetweenChunksMs(0L);
+        paymentService.setBatchRefundProperties(properties);
+
+        UUID pSuccess = UUID.randomUUID();
+        UUID pFail = UUID.randomUUID();
+
+        Payment payment = Payment.builder().id(pSuccess).amount(new BigDecimal("100000.00")).status(PaymentStatus.SUCCESS).method(PaymentGateway.VNPAY).build();
+        when(paymentRepository.findById(pSuccess)).thenReturn(Optional.of(payment));
+        when(paymentRepository.findById(pFail)).thenReturn(Optional.empty()); // Sẽ throw NOT_FOUND
+
+        when(refundLogRepository.findByPaymentId(pSuccess)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .success(true)
+                .status(RefundStatus.SUCCESS)
+                .gatewayRefundId("GW-BATCH-PARTIAL")
+                .refundedAt(Instant.now())
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).paymentId(l.getPayment() != null ? l.getPayment().getId() : null).status(l.getStatus()).amount(l.getAmount()).build();
+        });
+
+        BatchRefundRequest request = BatchRefundRequest.builder()
+                .requests(List.of(
+                        CreateRefundRequest.builder().paymentId(pSuccess).amount(new BigDecimal("100000.00")).reason("Succeed").build(),
+                        CreateRefundRequest.builder().paymentId(pFail).amount(new BigDecimal("50000.00")).reason("Fail").build()
+                ))
+                .chunkSize(5)
+                .requestsPerSecond(50.0)
+                .build();
+
+        BatchRefundResponse response = paymentService.batchRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTotalRequested()).isEqualTo(2);
+        assertThat(response.getTotalSuccess()).isEqualTo(1);
+        assertThat(response.getTotalFailed()).isEqualTo(1);
+        assertThat(response.getTotalRefundedAmount()).isEqualByComparingTo("100000.00");
+        assertThat(response.getResults()).hasSize(2);
+        assertThat(response.getResults().get(0).getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(response.getResults().get(1).getStatus()).isEqualTo(RefundStatus.FAILED);
+    }
+
+    @Test
+    @DisplayName("batchRefund: Danh sách request rỗng ném ngoại lệ BAD_REQUEST")
+    void batchRefund_EmptyList_ThrowsBadRequest() {
+        BatchRefundRequest emptyRequest = BatchRefundRequest.builder().requests(List.of()).build();
+        assertThatThrownBy(() -> paymentService.batchRefund(emptyRequest))
+                .isInstanceOf(AppException.class);
+    }
+
+    @Test
+    @DisplayName("batchRefundByOrders: Xử lý hoàn tiền hàng loạt theo danh sách đơn hàng thành công")
+    void batchRefundByOrders_Success_AcrossMultipleChunks() {
+        BatchRefundProperties properties = new BatchRefundProperties();
+        properties.setDefaultChunkSize(2);
+        properties.setDefaultRequestsPerSecond(100.0);
+        properties.setDelayBetweenChunksMs(0L);
+        paymentService.setBatchRefundProperties(properties);
+
+        UUID o1 = UUID.randomUUID();
+        UUID o2 = UUID.randomUUID();
+        UUID p1 = UUID.randomUUID();
+        UUID p2 = UUID.randomUUID();
+
+        Payment payment1 = Payment.builder().id(p1).orderId(o1).amount(new BigDecimal("150000.00")).status(PaymentStatus.SUCCESS).method(PaymentGateway.VNPAY).build();
+        Payment payment2 = Payment.builder().id(p2).orderId(o2).amount(new BigDecimal("250000.00")).status(PaymentStatus.SUCCESS).method(PaymentGateway.VNPAY).build();
+
+        when(paymentRepository.findFirstByOrderIdAndStatusOrderByCreatedAtDesc(o1, PaymentStatus.SUCCESS)).thenReturn(Optional.of(payment1));
+        when(paymentRepository.findFirstByOrderIdAndStatusOrderByCreatedAtDesc(o2, PaymentStatus.SUCCESS)).thenReturn(Optional.of(payment2));
+        when(paymentRepository.findById(p1)).thenReturn(Optional.of(payment1));
+        when(paymentRepository.findById(p2)).thenReturn(Optional.of(payment2));
+
+        when(refundLogRepository.findByPaymentId(any())).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .success(true)
+                .status(RefundStatus.SUCCESS)
+                .gatewayRefundId("GW-ORDER-REFUND")
+                .refundedAt(Instant.now())
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(invocation -> {
+            RefundLog l = invocation.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).paymentId(l.getPayment() != null ? l.getPayment().getId() : null).orderId(o1).status(l.getStatus()).amount(l.getAmount()).build();
+        });
+
+        BatchRefundByOrdersRequest request = BatchRefundByOrdersRequest.builder()
+                .requests(List.of(
+                        InternalRefundOrderRequest.builder().orderId(o1).amount(new BigDecimal("150000.00")).reason("Event cancel 1").build(),
+                        InternalRefundOrderRequest.builder().orderId(o2).amount(new BigDecimal("250000.00")).reason("Event cancel 2").build()
+                ))
+                .chunkSize(2)
+                .requestsPerSecond(100.0)
+                .build();
+
+        BatchRefundResponse response = paymentService.batchRefundByOrders(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getTotalRequested()).isEqualTo(2);
+        assertThat(response.getTotalSuccess()).isEqualTo(2);
+        assertThat(response.getTotalFailed()).isEqualTo(0);
+        assertThat(response.getTotalRefundedAmount()).isEqualByComparingTo("400000.00");
+    }
+
+    @Test
+    @DisplayName("batchRefundByOrders: Danh sách đơn hàng rỗng ném ngoại lệ BAD_REQUEST")
+    void batchRefundByOrders_EmptyList_ThrowsBadRequest() {
+        BatchRefundByOrdersRequest emptyRequest = BatchRefundByOrdersRequest.builder().requests(List.of()).build();
+        assertThatThrownBy(() -> paymentService.batchRefundByOrders(emptyRequest))
+                .isInstanceOf(AppException.class);
     }
 }
 
