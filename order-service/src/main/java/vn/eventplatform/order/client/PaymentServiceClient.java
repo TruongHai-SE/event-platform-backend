@@ -22,4 +22,10 @@ public interface PaymentServiceClient {
             @RequestHeader("X-Internal-Secret") String secret,
             @RequestBody vn.eventplatform.order.client.dto.InternalRefundOrderRequest request
     );
+
+    @PostMapping("/internal/v1/payments/refunds/batch")
+    ApiResponse<vn.eventplatform.order.client.dto.BatchRefundResponse> batchRefundByOrders(
+            @RequestHeader("X-Internal-Secret") String secret,
+            @RequestBody vn.eventplatform.order.client.dto.BatchRefundByOrdersRequest request
+    );
 }
