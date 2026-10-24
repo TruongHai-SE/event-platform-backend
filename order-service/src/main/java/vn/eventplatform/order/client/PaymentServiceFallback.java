@@ -34,4 +34,18 @@ public class PaymentServiceFallback implements PaymentServiceClient {
                 .reason(request != null ? request.getReason() : null)
                 .build());
     }
+
+    @Override
+    public ApiResponse<vn.eventplatform.order.client.dto.BatchRefundResponse> batchRefundByOrders(
+            String secret, vn.eventplatform.order.client.dto.BatchRefundByOrdersRequest request) {
+        log.warn("[PaymentServiceFallback] Không thể kết nối tới payment-service để hoàn tiền hàng loạt: totalCount={}",
+                request != null && request.getRequests() != null ? request.getRequests().size() : 0);
+        int total = request != null && request.getRequests() != null ? request.getRequests().size() : 0;
+        return ApiResponse.ok(vn.eventplatform.order.client.dto.BatchRefundResponse.builder()
+                .totalRequested(total)
+                .totalSuccess(0)
+                .totalFailed(total)
+                .totalRefundedAmount(java.math.BigDecimal.ZERO)
+                .build());
+    }
 }
