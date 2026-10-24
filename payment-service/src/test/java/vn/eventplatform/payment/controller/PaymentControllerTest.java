@@ -270,4 +270,100 @@ class PaymentControllerTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isForbidden());
     }
+
+    @Test
+    @WithMockUser(roles = {"STAFF"})
+    @DisplayName("POST /api/v1/payments/refund - Staff bị từ chối 403 Forbidden (chỉ Admin mới có quyền)")
+    void createRefund_Staff_Forbidden() throws Exception {
+        CreateRefundRequest request = CreateRefundRequest.builder()
+                .paymentId(UUID.randomUUID())
+                .amount(new BigDecimal("50000.00"))
+                .reason("Staff refund attempt")
+                .idempotencyKey("IDEM-REFUND-STAFF-001")
+                .build();
+
+        mockMvc.perform(post("/api/v1/payments/refund")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = {"ADMIN"})
+    @DisplayName("POST /api/v1/payments/refunds/{refundLogId}/confirm - Admin xác nhận hoàn tiền thành công")
+    void confirmManualRefund_Admin_Success() throws Exception {
+        UUID refundLogId = UUID.randomUUID();
+        ConfirmManualRefundRequest request = ConfirmManualRefundRequest.builder()
+                .gatewayRefundId("FT26102399998888")
+                .note("Đã hoàn qua VNPay portal")
+                .build();
+
+        RefundResponse response = RefundResponse.builder()
+                .id(refundLogId)
+                .status(RefundStatus.SUCCESS)
+                .gatewayRefundId("FT26102399998888")
+                .amount(new BigDecimal("50000.00"))
+                .build();
+
+        when(paymentService.confirmManualRefund(eq(refundLogId), any(ConfirmManualRefundRequest.class)))
+                .thenReturn(response);
+
+        mockMvc.perform(post("/api/v1/payments/refunds/{refundLogId}/confirm", refundLogId)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.gatewayRefundId").value("FT26102399998888"));
+    }
+
+    @Test
+    @WithMockUser(roles = {"STAFF"})
+    @DisplayName("POST /api/v1/payments/refunds/{refundLogId}/confirm - Staff bị từ chối 403 Forbidden")
+    void confirmManualRefund_Staff_Forbidden() throws Exception {
+        UUID refundLogId = UUID.randomUUID();
+        ConfirmManualRefundRequest request = ConfirmManualRefundRequest.builder()
+                .gatewayRefundId("FT26102399998888")
+                .note("Staff attempting confirm")
+                .build();
+
+        mockMvc.perform(post("/api/v1/payments/refunds/{refundLogId}/confirm", refundLogId)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = {"ADMIN"})
+    @DisplayName("GET /api/v1/payments/refunds/payment/{paymentId} - Admin tra cứu lịch sử hoàn tiền thành công")
+    void getRefundsByPaymentId_Admin_Success() throws Exception {
+        UUID paymentId = UUID.randomUUID();
+        List<RefundResponse> responses = List.of(
+                RefundResponse.builder()
+                        .id(UUID.randomUUID())
+                        .paymentId(paymentId)
+                        .amount(new BigDecimal("50000.00"))
+                        .status(RefundStatus.SUCCESS)
+                        .build()
+        );
+
+        when(paymentService.getRefundsByPaymentId(paymentId)).thenReturn(responses);
+
+        mockMvc.perform(get("/api/v1/payments/refunds/payment/{paymentId}", paymentId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data[0].paymentId").value(paymentId.toString()));
+    }
+
+    @Test
+    @WithMockUser(roles = {"STAFF"})
+    @DisplayName("GET /api/v1/payments/refunds/payment/{paymentId} - Staff bị từ chối 403 Forbidden")
+    void getRefundsByPaymentId_Staff_Forbidden() throws Exception {
+        UUID paymentId = UUID.randomUUID();
+
+        mockMvc.perform(get("/api/v1/payments/refunds/payment/{paymentId}", paymentId))
+                .andExpect(status().isForbidden());
+    }
 }
