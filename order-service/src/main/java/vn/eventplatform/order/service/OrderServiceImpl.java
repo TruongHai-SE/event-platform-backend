@@ -1066,6 +1066,8 @@ public class OrderServiceImpl implements OrderService {
 
         log.info("Tìm thấy {} đơn hàng (PAID/PENDING) cần xử lý do sự kiện bị hủy eventId={}", orders.size(), eventId);
 
+        List<InternalRefundOrderRequest> batchRefundRequests = new ArrayList<>();
+
         for (Order order : orders) {
             try {
                 if (order.getStatus() == OrderStatus.PAID) {
@@ -1083,27 +1085,21 @@ public class OrderServiceImpl implements OrderService {
                     order.setUpdatedAt(Instant.now());
                     orderRepository.save(order);
 
-                    // 3. Hoàn tiền 100% không khấu trừ phí
+                    // 3. Gom yêu cầu hoàn tiền 100% không khấu trừ phí để xử lý batch
                     BigDecimal refundAmount = order.getTotalAmount() != null ? order.getTotalAmount() : BigDecimal.ZERO;
-                    if (paymentServiceClient != null && refundAmount.compareTo(BigDecimal.ZERO) > 0) {
-                        try {
-                            InternalRefundOrderRequest refundReq = InternalRefundOrderRequest.builder()
-                                    .orderId(order.getId())
-                                    .amount(refundAmount)
-                                    .reason("Sự kiện bị hủy: " + reason)
-                                    .idempotencyKey("EVENT-CANCEL-REFUND-" + order.getOrderCode() + "-" + eventId)
-                                    .build();
-                            paymentServiceClient.refundByOrder(internalSecret, refundReq);
-                        } catch (Exception e) {
-                            log.error("Lỗi khi gọi payment-service hoàn tiền cho orderCode={} (sự kiện bị hủy): {}",
-                                    order.getOrderCode(), e.getMessage());
-                        }
+                    if (refundAmount.compareTo(BigDecimal.ZERO) > 0) {
+                        batchRefundRequests.add(InternalRefundOrderRequest.builder()
+                                .orderId(order.getId())
+                                .amount(refundAmount)
+                                .reason("Sự kiện bị hủy: " + reason)
+                                .idempotencyKey("EVENT-CANCEL-REFUND-" + order.getOrderCode() + "-" + eventId)
+                                .build());
                     }
 
                     // 4. Hoàn trả voucher về ví cho khách (100% tiền + hoàn voucher)
                     releaseVoucherForOrder(order, "EVENT_CANCELLED");
 
-                    log.info("Đã hoàn tiền 100% và hoàn voucher cho đơn hàng PAID: orderCode={}", order.getOrderCode());
+                    log.info("Đã cập nhật trạng thái REFUNDED và hoàn voucher cho đơn hàng PAID: orderCode={}", order.getOrderCode());
 
                 } else if (order.getStatus() == OrderStatus.PENDING) {
                     // Đơn đang PENDING: hủy đơn, nhả giữ chỗ tồn kho và hoàn voucher
@@ -1119,6 +1115,26 @@ public class OrderServiceImpl implements OrderService {
             } catch (Exception ex) {
                 log.error("Lỗi khi xử lý đơn hàng orderCode={} cho sự kiện bị hủy eventId={}",
                         order.getOrderCode(), eventId, ex);
+            }
+        }
+
+        // 5. Gọi batch refund sang payment-service theo chunk và rate limit
+        if (paymentServiceClient != null && !batchRefundRequests.isEmpty()) {
+            try {
+                log.info("Gửi {} yêu cầu hoàn tiền hàng loạt sang payment-service cho sự kiện eventId={}",
+                        batchRefundRequests.size(), eventId);
+                BatchRefundByOrdersRequest batchReq = BatchRefundByOrdersRequest.builder()
+                        .requests(batchRefundRequests)
+                        .build();
+                ApiResponse<BatchRefundResponse> response = paymentServiceClient.batchRefundByOrders(internalSecret, batchReq);
+                if (response != null && response.getData() != null) {
+                    BatchRefundResponse data = response.getData();
+                    log.info("Hoàn tất batch refund cho sự kiện eventId={}: totalRequested={}, totalSuccess={}, totalFailed={}, totalRefundedAmount={}",
+                            eventId, data.getTotalRequested(), data.getTotalSuccess(), data.getTotalFailed(), data.getTotalRefundedAmount());
+                }
+            } catch (Exception e) {
+                log.error("Lỗi khi gọi payment-service batch refund cho sự kiện eventId={}: {}",
+                        eventId, e.getMessage(), e);
             }
         }
     }

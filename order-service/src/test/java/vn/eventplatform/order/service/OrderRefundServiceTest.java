@@ -17,6 +17,7 @@ import vn.eventplatform.order.client.EventServiceClient;
 import vn.eventplatform.order.client.PaymentServiceClient;
 import vn.eventplatform.order.client.PromotionServiceClient;
 import vn.eventplatform.order.client.TicketServiceClient;
+import vn.eventplatform.order.client.dto.BatchRefundByOrdersRequest;
 import vn.eventplatform.order.client.dto.InternalEventSnapshotResponse;
 import vn.eventplatform.order.client.dto.InternalRefundOrderRequest;
 import vn.eventplatform.order.client.dto.ReleaseInventoryRequest;
@@ -289,17 +290,64 @@ class OrderRefundServiceTest {
             // Kiểm tra gọi hủy vé cho đơn PAID
             verify(ticketServiceClient).cancelTicketsByOrderId(any(), eq(orderId), eq("Bão lớn đổ bộ, hủy sự kiện theo chỉ thị"));
 
-            // Kiểm tra hoàn 100% (500.000) qua payment-service cho đơn PAID
-            ArgumentCaptor<InternalRefundOrderRequest> refundCaptor = ArgumentCaptor.forClass(InternalRefundOrderRequest.class);
-            verify(paymentServiceClient).refundByOrder(any(), refundCaptor.capture());
-            assertThat(refundCaptor.getValue().getOrderId()).isEqualTo(orderId);
-            assertThat(refundCaptor.getValue().getAmount()).isEqualByComparingTo("500000");
+            // Kiểm tra hoàn 100% (500.000) qua payment-service cho đơn PAID bằng Batch Refund
+            ArgumentCaptor<BatchRefundByOrdersRequest> batchCaptor = ArgumentCaptor.forClass(BatchRefundByOrdersRequest.class);
+            verify(paymentServiceClient).batchRefundByOrders(any(), batchCaptor.capture());
+            assertThat(batchCaptor.getValue().getRequests()).hasSize(1);
+            assertThat(batchCaptor.getValue().getRequests().get(0).getOrderId()).isEqualTo(orderId);
+            assertThat(batchCaptor.getValue().getRequests().get(0).getAmount()).isEqualByComparingTo("500000");
 
             // Kiểm tra hoàn voucher cho cả đơn PAID và PENDING (2 lần gọi)
             verify(promotionServiceClient, times(2)).releaseVoucher(any(), any());
 
             // Kiểm tra đơn PENDING: chuyển sang CANCELLED
             assertThat(pendingOrder.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        }
+
+        @Test
+        @DisplayName("Xử lý hủy sự kiện có nhiều đơn PAID: gom tất cả vào một batch refund duy nhất")
+        void processEventCancellation_MultiplePaidOrders_BatchesTogether() {
+            UUID eventId = UUID.randomUUID();
+            UUID orderId1 = UUID.randomUUID();
+            UUID orderId2 = UUID.randomUUID();
+
+            Order paid1 = Order.builder()
+                    .id(orderId1)
+                    .orderCode("ORD-PAID-1")
+                    .eventId(eventId)
+                    .status(OrderStatus.PAID)
+                    .totalAmount(new BigDecimal("200000"))
+                    .items(List.of())
+                    .build();
+
+            Order paid2 = Order.builder()
+                    .id(orderId2)
+                    .orderCode("ORD-PAID-2")
+                    .eventId(eventId)
+                    .status(OrderStatus.PAID)
+                    .totalAmount(new BigDecimal("400000"))
+                    .items(List.of())
+                    .build();
+
+            when(orderRepository.findByEventIdAndStatusInWithItems(eq(eventId), any()))
+                    .thenReturn(List.of(paid1, paid2));
+            when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            EventCancelledEventPayload payload = EventCancelledEventPayload.builder()
+                    .eventId(eventId)
+                    .cancellationReason("Lý do thời tiết")
+                    .build();
+
+            orderService.processEventCancellation(payload);
+
+            assertThat(paid1.getStatus()).isEqualTo(OrderStatus.REFUNDED);
+            assertThat(paid2.getStatus()).isEqualTo(OrderStatus.REFUNDED);
+
+            ArgumentCaptor<BatchRefundByOrdersRequest> batchCaptor = ArgumentCaptor.forClass(BatchRefundByOrdersRequest.class);
+            verify(paymentServiceClient, times(1)).batchRefundByOrders(any(), batchCaptor.capture());
+            assertThat(batchCaptor.getValue().getRequests()).hasSize(2);
+            assertThat(batchCaptor.getValue().getRequests().get(0).getOrderId()).isEqualTo(orderId1);
+            assertThat(batchCaptor.getValue().getRequests().get(1).getOrderId()).isEqualTo(orderId2);
         }
     }
 }
