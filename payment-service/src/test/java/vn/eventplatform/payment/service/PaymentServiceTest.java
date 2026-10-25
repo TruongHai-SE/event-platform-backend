@@ -1626,5 +1626,175 @@ class PaymentServiceTest {
         assertThat(item.getStatus()).isEqualTo(RefundStatus.FAILED);
         assertThat(item.getMessage()).containsIgnoringCase("timeout");
     }
+
+    @Test
+    @DisplayName("confirmManualRefund: Xác nhận thành công cho giao dịch đang ở trạng thái FAILED")
+    void confirmManualRefund_FromFailedStatus_Success() {
+        UUID refundLogId = UUID.randomUUID();
+        UUID paymentId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(paymentId)
+                .amount(new BigDecimal("300000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .build();
+
+        RefundLog refundLog = RefundLog.builder()
+                .id(refundLogId)
+                .payment(payment)
+                .amount(new BigDecimal("300000.00"))
+                .status(RefundStatus.FAILED)
+                .reason("Cổng thanh toán lỗi mạng")
+                .build();
+
+        ConfirmManualRefundRequest request = ConfirmManualRefundRequest.builder()
+                .gatewayRefundId("MANUAL-VCB-998877")
+                .note("Kế toán đã chuyển khoản tay qua VCB")
+                .build();
+
+        when(refundLogRepository.findById(refundLogId)).thenReturn(Optional.of(refundLog));
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(refundLogRepository.findByPaymentId(paymentId)).thenReturn(List.of(refundLog));
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(inv -> {
+            RefundLog l = inv.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).gatewayRefundId(l.getGatewayRefundId()).build();
+        });
+
+        RefundResponse response = paymentService.confirmManualRefund(refundLogId, request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(response.getGatewayRefundId()).isEqualTo("MANUAL-VCB-998877");
+        assertThat(refundLog.getStatus()).isEqualTo(RefundStatus.SUCCESS);
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
+        verify(paymentRepository).save(payment);
+    }
+
+    @Test
+    @DisplayName("switchRefundToManualBank: Chuyển yêu cầu hoàn tiền FAILED sang MANUAL_BANK thành công")
+    void switchRefundToManualBank_Success() {
+        UUID refundLogId = UUID.randomUUID();
+        RefundLog refundLog = RefundLog.builder()
+                .id(refundLogId)
+                .amount(new BigDecimal("150000.00"))
+                .status(RefundStatus.FAILED)
+                .reason("Cổng báo timeout")
+                .build();
+
+        when(refundLogRepository.findById(refundLogId)).thenReturn(Optional.of(refundLog));
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(inv -> {
+            RefundLog l = inv.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).reason(l.getReason()).build();
+        });
+
+        RefundResponse response = paymentService.switchRefundToManualBank(refundLogId, "Chuyển sang kế toán đối soát");
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.MANUAL_BANK);
+        assertThat(refundLog.getStatus()).isEqualTo(RefundStatus.MANUAL_BANK);
+        assertThat(refundLog.getReason()).contains("Chuyển sang kế toán đối soát");
+        verify(refundLogRepository).save(refundLog);
+    }
+
+    @Test
+    @DisplayName("switchRefundToManualBank: Từ chối chuyển nếu giao dịch đã hoàn SUCCESS (ném BAD_REQUEST)")
+    void switchRefundToManualBank_AlreadySuccess_ThrowsBadRequest() {
+        UUID refundLogId = UUID.randomUUID();
+        RefundLog refundLog = RefundLog.builder()
+                .id(refundLogId)
+                .status(RefundStatus.SUCCESS)
+                .build();
+
+        when(refundLogRepository.findById(refundLogId)).thenReturn(Optional.of(refundLog));
+
+        assertThatThrownBy(() -> paymentService.switchRefundToManualBank(refundLogId, "Thử chuyển đơn đã xong"))
+                .isInstanceOf(AppException.class)
+                .hasMessageContaining("Không thể chuyển yêu cầu hoàn tiền đã SUCCESS");
+    }
+
+    @Test
+    @DisplayName("switchRefundToManualBank: Trả về trực tiếp nếu giao dịch đã ở trạng thái MANUAL_BANK (idempotent)")
+    void switchRefundToManualBank_AlreadyManualBank_Idempotent() {
+        UUID refundLogId = UUID.randomUUID();
+        RefundLog refundLog = RefundLog.builder()
+                .id(refundLogId)
+                .status(RefundStatus.MANUAL_BANK)
+                .reason("Đã ở trạng thái chờ chuyển khoản")
+                .build();
+
+        when(refundLogRepository.findById(refundLogId)).thenReturn(Optional.of(refundLog));
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(inv -> {
+            RefundLog l = inv.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).build();
+        });
+
+        RefundResponse response = paymentService.switchRefundToManualBank(refundLogId, "Lặp lại");
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.MANUAL_BANK);
+        verify(refundLogRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("getManualBankRefunds: Lấy danh sách giao dịch MANUAL_BANK thành công")
+    void getManualBankRefunds_Success() {
+        RefundLog log1 = RefundLog.builder().id(UUID.randomUUID()).status(RefundStatus.MANUAL_BANK).build();
+        RefundLog log2 = RefundLog.builder().id(UUID.randomUUID()).status(RefundStatus.MANUAL_BANK).build();
+
+        when(refundLogRepository.findByStatusOrderByCreatedAtDesc(RefundStatus.MANUAL_BANK)).thenReturn(List.of(log1, log2));
+        when(refundLogMapper.toResponseList(any())).thenReturn(List.of(
+                RefundResponse.builder().id(log1.getId()).status(RefundStatus.MANUAL_BANK).build(),
+                RefundResponse.builder().id(log2.getId()).status(RefundStatus.MANUAL_BANK).build()
+        ));
+
+        List<RefundResponse> results = paymentService.getManualBankRefunds();
+
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).getStatus()).isEqualTo(RefundStatus.MANUAL_BANK);
+        verify(refundLogRepository).findByStatusOrderByCreatedAtDesc(RefundStatus.MANUAL_BANK);
+    }
+
+    @Test
+    @DisplayName("createRefund: Khi cổng thanh toán báo FAILED tự động fallback sang MANUAL_BANK cho kế toán")
+    void createRefund_GatewayFailed_FallsBackToManualBank() {
+        // Tắt mockRefundEnabled để kiểm tra luồng fallback thực tế
+        ReflectionTestUtils.setField(paymentService, "mockRefundEnabled", false);
+
+        UUID pId = UUID.randomUUID();
+        Payment payment = Payment.builder()
+                .id(pId)
+                .amount(new BigDecimal("100000.00"))
+                .status(PaymentStatus.SUCCESS)
+                .method(PaymentGateway.VNPAY)
+                .build();
+
+        when(paymentRepository.findById(pId)).thenReturn(Optional.of(payment));
+        when(refundLogRepository.findByPaymentId(pId)).thenReturn(List.of());
+        when(refundLogRepository.save(any(RefundLog.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(paymentStrategyFactory.getStrategy(PaymentGateway.VNPAY)).thenReturn(paymentStrategy);
+        when(paymentStrategy.refund(any())).thenReturn(RefundResult.builder()
+                .status(RefundStatus.FAILED)
+                .message("Cổng VNPay từ chối mã thẻ không hợp lệ")
+                .build());
+        when(refundLogMapper.toResponse(any(RefundLog.class))).thenAnswer(inv -> {
+            RefundLog l = inv.getArgument(0);
+            return RefundResponse.builder().id(l.getId()).status(l.getStatus()).reason(l.getReason()).build();
+        });
+
+        CreateRefundRequest request = CreateRefundRequest.builder()
+                .paymentId(pId)
+                .amount(new BigDecimal("100000.00"))
+                .reason("Khách yêu cầu hoàn")
+                .build();
+
+        RefundResponse response = paymentService.createRefund(request);
+
+        assertThat(response).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(RefundStatus.MANUAL_BANK);
+        assertThat(response.getReason()).contains("Chuyển hoàn thủ công");
+
+        // Bật lại mockRefundEnabled cho các test khác nếu có
+        ReflectionTestUtils.setField(paymentService, "mockRefundEnabled", true);
+    }
 }
 

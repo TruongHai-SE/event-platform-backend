@@ -637,6 +637,10 @@ public class PaymentServiceImpl implements PaymentService {
     @Override
     @Transactional
     public RefundResponse createRefund(CreateRefundRequest request) {
+        return createRefundInternal(request, true);
+    }
+
+    private RefundResponse createRefundInternal(CreateRefundRequest request, boolean fallbackToManualBank) {
         Payment payment = paymentRepository.findById(request.getPaymentId())
                 .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy giao dịch thanh toán gốc"));
 
@@ -705,7 +709,21 @@ public class PaymentServiceImpl implements PaymentService {
                 .method(payment.getMethod())
                 .build();
 
-        RefundResult refundResult = paymentStrategyFactory.getStrategy(payment.getMethod()).refund(refundContext);
+        RefundResult refundResult;
+        try {
+            refundResult = paymentStrategyFactory.getStrategy(payment.getMethod()).refund(refundContext);
+        } catch (Exception e) {
+            log.error("Lỗi ngoại lệ khi gọi cổng thanh toán hoàn tiền cho paymentId={}: {}", payment.getId(), e.getMessage());
+            if (!fallbackToManualBank) {
+                throw e;
+            }
+            refundResult = RefundResult.builder()
+                    .success(false)
+                    .refundLogId(savedRefundLog.getId())
+                    .status(RefundStatus.FAILED)
+                    .message("Lỗi cổng thanh toán: " + e.getMessage())
+                    .build();
+        }
 
         if (mockRefundEnabled && (refundResult == null || refundResult.getStatus() != RefundStatus.SUCCESS)) {
             log.info("MOCK SANDBOX: Tự động giả lập hoàn tiền thành công cho paymentId={}, method={}, amount={}",
@@ -721,12 +739,29 @@ public class PaymentServiceImpl implements PaymentService {
                     .build();
         }
 
-        savedRefundLog.setStatus(refundResult.getStatus());
-        savedRefundLog.setGatewayRefundId(refundResult.getGatewayRefundId());
-        savedRefundLog.setRefundedAt(refundResult.getRefundedAt());
+        if (refundResult == null || refundResult.getStatus() == RefundStatus.FAILED) {
+            if (fallbackToManualBank) {
+                log.warn("Hoàn tiền qua cổng thất bại cho paymentId={}. Tự động fallback sang MANUAL_BANK để kế toán xử lý", payment.getId());
+                savedRefundLog.setStatus(RefundStatus.MANUAL_BANK);
+                savedRefundLog.setGatewayRefundId(refundResult != null ? refundResult.getGatewayRefundId() : null);
+                String failMsg = (refundResult != null && refundResult.getMessage() != null)
+                        ? refundResult.getMessage()
+                        : "Cổng thanh toán từ chối hoàn tiền";
+                savedRefundLog.setReason(savedRefundLog.getReason() != null
+                        ? savedRefundLog.getReason() + " | Thất bại qua cổng (" + failMsg + ") -> Chuyển hoàn thủ công"
+                        : "Thất bại qua cổng (" + failMsg + ") -> Chuyển hoàn thủ công");
+            } else {
+                savedRefundLog.setStatus(RefundStatus.FAILED);
+                savedRefundLog.setGatewayRefundId(refundResult != null ? refundResult.getGatewayRefundId() : null);
+            }
+        } else {
+            savedRefundLog.setStatus(refundResult.getStatus());
+            savedRefundLog.setGatewayRefundId(refundResult.getGatewayRefundId());
+            savedRefundLog.setRefundedAt(refundResult.getRefundedAt());
+        }
         refundLogRepository.save(savedRefundLog);
 
-        if (refundResult.getStatus() == RefundStatus.SUCCESS) {
+        if (refundResult != null && refundResult.getStatus() == RefundStatus.SUCCESS) {
             BigDecimal updatedTotal = totalRefunded.add(request.getAmount());
             if (updatedTotal.compareTo(payment.getAmount()) >= 0) {
                 payment.setStatus(PaymentStatus.REFUNDED);
@@ -742,6 +777,10 @@ public class PaymentServiceImpl implements PaymentService {
     @Override
     @Transactional
     public RefundResponse refundByOrder(InternalRefundOrderRequest request) {
+        return refundByOrderInternal(request, true);
+    }
+
+    private RefundResponse refundByOrderInternal(InternalRefundOrderRequest request, boolean fallbackToManualBank) {
         if (request.getOrderId() == null) {
             throw new AppException(ErrorCode.BAD_REQUEST, "Order ID không được để trống");
         }
@@ -772,7 +811,7 @@ public class PaymentServiceImpl implements PaymentService {
                 .idempotencyKey(request.getIdempotencyKey())
                 .build();
 
-        return createRefund(refundReq);
+        return createRefundInternal(refundReq, fallbackToManualBank);
     }
 
     @Override
@@ -786,8 +825,10 @@ public class PaymentServiceImpl implements PaymentService {
             return refundLogMapper.toResponse(refundLog);
         }
 
-        if (refundLog.getStatus() != RefundStatus.MANUAL_BANK && refundLog.getStatus() != RefundStatus.PROCESSING) {
-            throw new AppException(ErrorCode.BAD_REQUEST, "Chỉ có thể xác nhận yêu cầu hoàn tiền đang ở trạng thái MANUAL_BANK hoặc PROCESSING");
+        if (refundLog.getStatus() != RefundStatus.MANUAL_BANK
+                && refundLog.getStatus() != RefundStatus.PROCESSING
+                && refundLog.getStatus() != RefundStatus.FAILED) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Chỉ có thể xác nhận yêu cầu hoàn tiền đang ở trạng thái MANUAL_BANK, PROCESSING hoặc FAILED");
         }
 
         refundLog.setStatus(RefundStatus.SUCCESS);
@@ -817,6 +858,39 @@ public class PaymentServiceImpl implements PaymentService {
         }
 
         return refundLogMapper.toResponse(savedRefundLog);
+    }
+
+    @Override
+    @Transactional
+    public RefundResponse switchRefundToManualBank(UUID refundLogId, String note) {
+        RefundLog refundLog = refundLogRepository.findById(refundLogId)
+                .orElseThrow(() -> new AppException(ErrorCode.NOT_FOUND, "Không tìm thấy yêu cầu hoàn tiền"));
+
+        if (refundLog.getStatus() == RefundStatus.SUCCESS) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Không thể chuyển yêu cầu hoàn tiền đã SUCCESS sang MANUAL_BANK");
+        }
+
+        if (refundLog.getStatus() == RefundStatus.MANUAL_BANK) {
+            log.info("Yêu cầu hoàn tiền refundLogId={} đã ở trạng thái MANUAL_BANK (idempotent)", refundLogId);
+            return refundLogMapper.toResponse(refundLog);
+        }
+
+        refundLog.setStatus(RefundStatus.MANUAL_BANK);
+        if (note != null && !note.isBlank()) {
+            refundLog.setReason(refundLog.getReason() != null
+                    ? refundLog.getReason() + " | " + note.trim()
+                    : note.trim());
+        }
+        RefundLog saved = refundLogRepository.save(refundLog);
+        log.info("Đã chuyển yêu cầu hoàn tiền refundLogId={} sang trạng thái MANUAL_BANK", refundLogId);
+        return refundLogMapper.toResponse(saved);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<RefundResponse> getManualBankRefunds() {
+        List<RefundLog> logs = refundLogRepository.findByStatusOrderByCreatedAtDesc(RefundStatus.MANUAL_BANK);
+        return refundLogMapper.toResponseList(logs);
     }
 
     @Override
@@ -880,8 +954,10 @@ public class PaymentServiceImpl implements PaymentService {
                 for (int attempt = 1; attempt <= 1 + maxRetries; attempt++) {
                     attempts = attempt;
                     rateLimiter.acquire();
+                    boolean isLastAttempt = (attempt == 1 + maxRetries);
                     try {
-                        refundResp = executeWithTimeout(() -> createRefund(req), itemTimeoutMs);
+                        final boolean fallback = isLastAttempt;
+                        refundResp = executeWithTimeout(() -> createRefundInternal(req, fallback), itemTimeoutMs);
                         if (refundResp != null && refundResp.getStatus() == RefundStatus.FAILED) {
                             if (attempt <= maxRetries) {
                                 long backoff = calculateBackoff(initialBackoffMs, backoffMultiplier, attempt);
@@ -913,9 +989,12 @@ public class PaymentServiceImpl implements PaymentService {
                         totalRefundedAmount = totalRefundedAmount.add(
                                 refundResp.getAmount() != null ? refundResp.getAmount() : BigDecimal.ZERO);
                     } else {
-                        // Trạng thái PROCESSING hoặc MANUAL_BANK (đã ghi nhận thành công)
+                        // Trạng thái PROCESSING hoặc MANUAL_BANK
                         totalSuccess++;
                     }
+                    String itemMsg = refundResp.getStatus() == RefundStatus.MANUAL_BANK
+                            ? "Hoàn tiền tự động thất bại sau " + attempts + " lần thử. Đã chuyển sang hoàn tiền thủ công qua ngân hàng (MANUAL_BANK)"
+                            : "Xử lý hoàn tiền thành công";
                     results.add(BatchRefundItemResult.builder()
                             .refundLogId(refundResp.getId())
                             .paymentId(refundResp.getPaymentId())
@@ -923,7 +1002,7 @@ public class PaymentServiceImpl implements PaymentService {
                             .amount(refundResp.getAmount())
                             .status(refundResp.getStatus())
                             .gatewayRefundId(refundResp.getGatewayRefundId())
-                            .message("Xử lý hoàn tiền thành công")
+                            .message(itemMsg)
                             .refundedAt(refundResp.getRefundedAt())
                             .retryAttempts(attempts - 1)
                             .build());
@@ -1020,8 +1099,10 @@ public class PaymentServiceImpl implements PaymentService {
                 for (int attempt = 1; attempt <= 1 + maxRetries; attempt++) {
                     attempts = attempt;
                     rateLimiter.acquire();
+                    boolean isLastAttempt = (attempt == 1 + maxRetries);
                     try {
-                        refundResp = executeWithTimeout(() -> refundByOrder(req), itemTimeoutMs);
+                        final boolean fallback = isLastAttempt;
+                        refundResp = executeWithTimeout(() -> refundByOrderInternal(req, fallback), itemTimeoutMs);
                         if (refundResp != null && refundResp.getStatus() == RefundStatus.FAILED) {
                             if (attempt <= maxRetries) {
                                 long backoff = calculateBackoff(initialBackoffMs, backoffMultiplier, attempt);
@@ -1053,8 +1134,12 @@ public class PaymentServiceImpl implements PaymentService {
                         totalRefundedAmount = totalRefundedAmount.add(
                                 refundResp.getAmount() != null ? refundResp.getAmount() : BigDecimal.ZERO);
                     } else {
+                        // Trạng thái PROCESSING hoặc MANUAL_BANK
                         totalSuccess++;
                     }
+                    String itemMsg = refundResp.getStatus() == RefundStatus.MANUAL_BANK
+                            ? "Hoàn tiền tự động thất bại sau " + attempts + " lần thử. Đã chuyển sang hoàn tiền thủ công qua ngân hàng (MANUAL_BANK)"
+                            : "Xử lý hoàn tiền thành công";
                     results.add(BatchRefundItemResult.builder()
                             .refundLogId(refundResp.getId())
                             .paymentId(refundResp.getPaymentId())
@@ -1062,7 +1147,7 @@ public class PaymentServiceImpl implements PaymentService {
                             .amount(refundResp.getAmount())
                             .status(refundResp.getStatus())
                             .gatewayRefundId(refundResp.getGatewayRefundId())
-                            .message("Xử lý hoàn tiền thành công")
+                            .message(itemMsg)
                             .refundedAt(refundResp.getRefundedAt())
                             .retryAttempts(attempts - 1)
                             .build());
