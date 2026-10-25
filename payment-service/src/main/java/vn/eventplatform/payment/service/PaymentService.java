@@ -37,6 +37,10 @@ public interface PaymentService {
 
     RefundResponse confirmManualRefund(UUID refundLogId, ConfirmManualRefundRequest request);
 
+    RefundResponse switchRefundToManualBank(UUID refundLogId, String note);
+
+    List<RefundResponse> getManualBankRefunds();
+
     List<RefundResponse> getRefundsByPaymentId(UUID paymentId);
 
     BatchRefundResponse batchRefund(BatchRefundRequest request);

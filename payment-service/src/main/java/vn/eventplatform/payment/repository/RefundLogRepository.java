@@ -3,6 +3,7 @@ package vn.eventplatform.payment.repository;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 import vn.eventplatform.payment.domain.RefundLog;
+import vn.eventplatform.payment.domain.RefundStatus;
 
 import java.util.List;
 import java.util.Optional;
@@ -18,4 +19,6 @@ public interface RefundLogRepository extends JpaRepository<RefundLog, UUID> {
     Optional<RefundLog> findByIdempotencyKey(String idempotencyKey);
 
     Optional<RefundLog> findByGatewayRefundId(String gatewayRefundId);
+
+    List<RefundLog> findByStatusOrderByCreatedAtDesc(RefundStatus status);
 }
