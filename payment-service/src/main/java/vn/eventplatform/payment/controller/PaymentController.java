@@ -119,13 +119,33 @@ public class PaymentController {
 
     @PostMapping("/refunds/{refundLogId}/confirm")
     @PreAuthorize("hasRole('ADMIN')")
-    @Operation(summary = "Xác nhận hoàn tiền thủ công qua ngân hàng (chuyển MANUAL_BANK/PROCESSING sang SUCCESS)")
+    @Operation(summary = "Xác nhận hoàn tiền thủ công qua ngân hàng (chuyển MANUAL_BANK/PROCESSING/FAILED sang SUCCESS)")
     public ResponseEntity<ApiResponse<RefundResponse>> confirmManualRefund(
             @PathVariable UUID refundLogId,
             @Valid @RequestBody ConfirmManualRefundRequest request
     ) {
         RefundResponse response = paymentService.confirmManualRefund(refundLogId, request);
         return ResponseEntity.ok(ApiResponse.ok("Xác nhận hoàn tiền thủ công thành công", response));
+    }
+
+    @PostMapping("/refunds/{refundLogId}/switch-to-manual")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Operation(summary = "Chuyển yêu cầu hoàn tiền sang MANUAL_BANK để kế toán xử lý thủ công qua ngân hàng")
+    public ResponseEntity<ApiResponse<RefundResponse>> switchRefundToManualBank(
+            @PathVariable UUID refundLogId,
+            @RequestBody(required = false) SwitchToManualRefundRequest request
+    ) {
+        String note = request != null ? request.getNote() : null;
+        RefundResponse response = paymentService.switchRefundToManualBank(refundLogId, note);
+        return ResponseEntity.ok(ApiResponse.ok("Chuyển trạng thái sang MANUAL_BANK thành công", response));
+    }
+
+    @GetMapping("/refunds/manual-bank")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Operation(summary = "Lấy danh sách các yêu cầu hoàn tiền đang chờ chuyển khoản thủ công (MANUAL_BANK)")
+    public ResponseEntity<ApiResponse<List<RefundResponse>>> getManualBankRefunds() {
+        List<RefundResponse> responses = paymentService.getManualBankRefunds();
+        return ResponseEntity.ok(ApiResponse.ok(responses));
     }
 
     @GetMapping("/refunds/payment/{paymentId}")

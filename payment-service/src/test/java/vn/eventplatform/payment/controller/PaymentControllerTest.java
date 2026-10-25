@@ -459,4 +459,89 @@ class PaymentControllerTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isForbidden());
     }
+
+    @Test
+    @WithMockUser(roles = {"ADMIN"})
+    @DisplayName("POST /api/v1/payments/refunds/{refundLogId}/switch-to-manual - Admin chuyển trạng thái hoàn tiền sang MANUAL_BANK thành công")
+    void switchRefundToManualBank_Admin_Success() throws Exception {
+        UUID refundLogId = UUID.randomUUID();
+        SwitchToManualRefundRequest request = SwitchToManualRefundRequest.builder()
+                .note("Cổng lỗi nhiều lần, chuyển kế toán xử lý chuyển khoản ngoài")
+                .build();
+
+        RefundResponse response = RefundResponse.builder()
+                .id(refundLogId)
+                .status(RefundStatus.MANUAL_BANK)
+                .amount(new BigDecimal("100000.00"))
+                .reason("Lỗi cổng -> Chuyển kế toán xử lý chuyển khoản ngoài")
+                .build();
+
+        when(paymentService.switchRefundToManualBank(eq(refundLogId), any())).thenReturn(response);
+
+        mockMvc.perform(post("/api/v1/payments/refunds/{refundLogId}/switch-to-manual", refundLogId)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.status").value("MANUAL_BANK"));
+    }
+
+    @Test
+    @WithMockUser(roles = {"STAFF"})
+    @DisplayName("POST /api/v1/payments/refunds/{refundLogId}/switch-to-manual - Staff bị từ chối 403 Forbidden")
+    void switchRefundToManualBank_Staff_Forbidden() throws Exception {
+        UUID refundLogId = UUID.randomUUID();
+        mockMvc.perform(post("/api/v1/payments/refunds/{refundLogId}/switch-to-manual", refundLogId)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = {"USER"})
+    @DisplayName("POST /api/v1/payments/refunds/{refundLogId}/switch-to-manual - User thường bị từ chối 403 Forbidden")
+    void switchRefundToManualBank_User_Forbidden() throws Exception {
+        UUID refundLogId = UUID.randomUUID();
+        mockMvc.perform(post("/api/v1/payments/refunds/{refundLogId}/switch-to-manual", refundLogId)
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = {"ADMIN"})
+    @DisplayName("GET /api/v1/payments/refunds/manual-bank - Admin lấy danh sách hoàn tiền thủ công thành công")
+    void getManualBankRefunds_Admin_Success() throws Exception {
+        RefundResponse response = RefundResponse.builder()
+                .id(UUID.randomUUID())
+                .status(RefundStatus.MANUAL_BANK)
+                .amount(new BigDecimal("200000.00"))
+                .build();
+
+        when(paymentService.getManualBankRefunds()).thenReturn(List.of(response));
+
+        mockMvc.perform(get("/api/v1/payments/refunds/manual-bank"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data[0].status").value("MANUAL_BANK"));
+    }
+
+    @Test
+    @WithMockUser(roles = {"STAFF"})
+    @DisplayName("GET /api/v1/payments/refunds/manual-bank - Staff bị từ chối 403 Forbidden")
+    void getManualBankRefunds_Staff_Forbidden() throws Exception {
+        mockMvc.perform(get("/api/v1/payments/refunds/manual-bank"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @WithMockUser(roles = {"USER"})
+    @DisplayName("GET /api/v1/payments/refunds/manual-bank - User thường bị từ chối 403 Forbidden")
+    void getManualBankRefunds_User_Forbidden() throws Exception {
+        mockMvc.perform(get("/api/v1/payments/refunds/manual-bank"))
+                .andExpect(status().isForbidden());
+    }
 }
